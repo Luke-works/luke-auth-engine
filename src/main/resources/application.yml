@@ -1,0 +1,56 @@
+server:
+  # Render injects PORT at runtime; 8083 is the local default (engine uses 8080)
+  port: ${PORT:8083}
+
+spring:
+  application:
+    name: luke-auth-engine
+
+luke:
+  auth:
+    # ── Upstream engine the gateway proxies to ──────────────────────────────
+    core-engine:
+      base-url: ${CORE_ENGINE_URL:http://localhost:8080}
+
+    # ── Clerk (authentication) ──────────────────────────────────────────────
+    # JWKS endpoint of your Clerk instance. For a dev instance it is
+    #   https://<frontend-api>.clerk.accounts.dev/.well-known/jwks.json
+    # The gateway verifies the token signature against these keys.
+    clerk:
+      jwks-url: ${CLERK_JWKS_URL:}
+      issuer: ${CLERK_ISSUER:}
+      # Optional: if set, the "azp"/"aud" claim must match one of these origins.
+      audience: ${CLERK_AUDIENCE:}
+
+    # ── Gateway signing key (the "secret badge") ────────────────────────────
+    # PEM-encoded PKCS#8 RSA private key used to sign act-as-user tokens.
+    # If unset, an ephemeral keypair is generated at startup (fine for local
+    # dev; in prod set GATEWAY_PRIVATE_KEY so restarts don't rotate the key).
+    gateway:
+      # PEM PKCS#8 RSA private key. If unset, an ephemeral key is generated at
+      # startup and the kid is derived from its thumbprint (engine refetches
+      # JWKS automatically after a restart). Set this for a stable prod key.
+      private-key: ${GATEWAY_PRIVATE_KEY:}
+      issuer: ${GATEWAY_ISSUER:luke-auth-engine}
+      audience: ${GATEWAY_AUDIENCE:luke-core-engine}
+      # How long an act-as-user token is valid. Short, since it is minted
+      # fresh per request, server-to-server.
+      ttl-seconds: ${GATEWAY_TTL_SECONDS:60}
+
+  cors:
+    # Origin(s) of the consumer UI. Local dev allows any localhost port.
+    allowed-origins: ${ALLOWED_ORIGINS:http://localhost:*}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    root: INFO
+    com.luke: DEBUG

@@ -1,0 +1,895 @@
+{
+  "info": {
+    "_postman_id": "b6e1d2a0-7c44-4f2e-9d11-luke-auth-gw-0001",
+    "name": "Luke — Engine via Auth Gateway",
+    "description": "Access luke-core-engine resources through luke-auth-engine (the consumer auth gateway).\n\n## Two ways in\n1. **Via Gateway** (`{{authBaseUrl}}`) — send a **Clerk session JWT** as a Bearer token. The gateway verifies it, resolves the user, mints a signed act-as-user token, and proxies to the engine. This is how the consumer app talks to the engine. Collection-level auth = `Bearer {{clerkJwt}}`.\n2. **Direct to Engine** (`{{engineBaseUrl}}`) — operator/admin endpoints (onboarding, tenant/group admin) use **HTTP Basic** and CANNOT go through the gateway (it only accepts Clerk Bearer). The `Engine Admin (DIRECT)` folder overrides auth to Basic and targets the engine directly.\n\n## Getting a Clerk JWT for `{{clerkJwt}}`\nThe gateway expects a real Clerk session token. Easiest ways:\n- Open the consumer UI in a browser, sign in, open DevTools console and run `await window.Clerk.session.getToken()`, copy the value.\n- Or copy the `Authorization: Bearer …` value from any network request the signed-in app makes.\nClerk session tokens are short-lived (~1 min) — re-fetch when you get 401s.\n\n## First-run gotcha: onboarding\nA Clerk user who has authenticated but was never onboarded gets **403 \"not provisioned\"** from the engine. Run `Engine Admin (DIRECT) → Onboard Clerk User` (operator Basic auth) once per user first. `clerkSub` there must equal the Clerk token's `sub` — the gateway maps it to `clerk:<sub>`.\n\n## Tenant scoping\n`X-Tenant-Id` selects the tenant for a request. Blank = all tenants you belong to. A specific id scopes to it (403 if you're not a member and not an operator).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{clerkJwt}}", "type": "string" }]
+  },
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Global guard: surface gateway/engine auth outcomes clearly.",
+          "pm.test('No server error (5xx)', function () {",
+          "  pm.expect(pm.response.code, 'status').to.be.below(500);",
+          "});",
+          "if (pm.response.code === 401) {",
+          "  console.log('401 — Clerk token missing/expired. Re-fetch window.Clerk.session.getToken().');",
+          "}",
+          "if (pm.response.code === 403) {",
+          "  console.log('403 — likely NOT onboarded (run Onboard Clerk User) or not a member of X-Tenant-Id.');",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "authBaseUrl", "value": "http://localhost:8083", "type": "string" },
+    { "key": "engineBaseUrl", "value": "http://localhost:8080", "type": "string" },
+    { "key": "clerkJwt", "value": "", "type": "string" },
+    { "key": "tenantId", "value": "", "type": "string" },
+    { "key": "operatorUser", "value": "admin", "type": "string" },
+    { "key": "operatorPass", "value": "admin", "type": "string" },
+    { "key": "clerkSub", "value": "user_REPLACE_WITH_CLERK_SUB", "type": "string" },
+    { "key": "processDefinitionKey", "value": "", "type": "string" },
+    { "key": "processDefinitionId", "value": "", "type": "string" },
+    { "key": "processInstanceId", "value": "", "type": "string" },
+    { "key": "taskId", "value": "", "type": "string" },
+    { "key": "deploymentId", "value": "", "type": "string" },
+    { "key": "decisionKey", "value": "", "type": "string" },
+    { "key": "clerkApiBase", "value": "https://api.clerk.com", "type": "string" },
+    { "key": "clerkSecretKey", "value": "", "type": "string" },
+    { "key": "clerkFapiBase", "value": "https://gorgeous-seal-77.clerk.accounts.dev", "type": "string" },
+    { "key": "newUserEmail", "value": "jane.doe@example.com", "type": "string" },
+    { "key": "newUserPassword", "value": "", "type": "string" },
+    { "key": "userId", "value": "", "type": "string" },
+    { "key": "sessionId", "value": "", "type": "string" },
+    { "key": "devBrowserToken", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "0 · Setup & Health",
+      "description": "Unauthenticated probes for the gateway and engine. Use these to confirm both services are up and the gateway is publishing its JWKS (which the engine fetches to trust act-as-user tokens).",
+      "item": [
+        {
+          "name": "Gateway · JWKS (public signing key)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{authBaseUrl}}/.well-known/jwks.json", "host": ["{{authBaseUrl}}"], "path": [".well-known", "jwks.json"] },
+            "description": "The gateway's public key. luke-core-engine fetches this (LUKE_AUTH_GATEWAY_JWKS_URL) to verify the act-as-user tokens the gateway signs."
+          }
+        },
+        {
+          "name": "Gateway · Health",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{authBaseUrl}}/actuator/health", "host": ["{{authBaseUrl}}"], "path": ["actuator", "health"] }
+          }
+        },
+        {
+          "name": "Engine · Health (direct)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{engineBaseUrl}}/actuator/health", "host": ["{{engineBaseUrl}}"], "path": ["actuator", "health"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1 · Identity (via Gateway)",
+      "item": [
+        {
+          "name": "Who am I",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "const me = pm.response.json();",
+                  "console.log('userId:', me.userId, '| operator:', me.operator);",
+                  "console.log('tenants:', JSON.stringify(me.tenants), '| groups:', JSON.stringify(me.groups));",
+                  "if (me.tenants && me.tenants.length && !pm.collectionVariables.get('tenantId')) {",
+                  "  pm.collectionVariables.set('tenantId', me.tenants[0]);",
+                  "  console.log('Captured tenantId =', me.tenants[0]);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{authBaseUrl}}/api/me", "host": ["{{authBaseUrl}}"], "path": ["api", "me"] },
+            "description": "Resolves the authenticated user's identity context (groups, tenants, operator flag). The consumer UI uses this for role-based nav gating. Proves your Clerk token → engine identity mapping works end-to-end."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 · Process Definitions (via Gateway)",
+      "item": [
+        {
+          "name": "List (latest versions)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "const defs = pm.response.json();",
+                  "if (Array.isArray(defs) && defs.length) {",
+                  "  pm.collectionVariables.set('processDefinitionId', defs[0].id);",
+                  "  pm.collectionVariables.set('processDefinitionKey', defs[0].key);",
+                  "  console.log('Captured processDefinitionId =', defs[0].id, '| key =', defs[0].key);",
+                  "} else { console.log('No process definitions — deploy a BPMN first.'); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": {
+              "raw": "{{authBaseUrl}}/engine-rest/process-definition?latestVersion=true&sortBy=name&sortOrder=asc",
+              "host": ["{{authBaseUrl}}"],
+              "path": ["engine-rest", "process-definition"],
+              "query": [
+                { "key": "latestVersion", "value": "true" },
+                { "key": "sortBy", "value": "name" },
+                { "key": "sortOrder", "value": "asc" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Count",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/process-definition/count", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "process-definition", "count"] }
+          }
+        },
+        {
+          "name": "Get by key",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/process-definition/key/{{processDefinitionKey}}", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "process-definition", "key", "{{processDefinitionKey}}"] }
+          }
+        },
+        {
+          "name": "Get BPMN XML",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/process-definition/{{processDefinitionId}}/xml", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "process-definition", "{{processDefinitionId}}", "xml"] }
+          }
+        },
+        {
+          "name": "Start instance (by key)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200/201', () => [200,201].includes(pm.response.code));",
+                  "if ([200,201].includes(pm.response.code)) {",
+                  "  const inst = pm.response.json();",
+                  "  pm.collectionVariables.set('processInstanceId', inst.id);",
+                  "  console.log('Started processInstanceId =', inst.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Tenant-Id", "value": "{{tenantId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"businessKey\": \"postman-{{$timestamp}}\",\n  \"variables\": {\n    \"sampleVar\": { \"value\": \"hello from postman\", \"type\": \"String\" }\n  }\n}"
+            },
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/process-definition/key/{{processDefinitionKey}}/start", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "process-definition", "key", "{{processDefinitionKey}}", "start"] },
+            "description": "Requires CREATE_INSTANCE permission on the definition (e.g. tenant-user / task-worker roles)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3 · Process Instances (via Gateway)",
+      "item": [
+        {
+          "name": "List",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": {
+              "raw": "{{authBaseUrl}}/engine-rest/process-instance?sortBy=instanceId&sortOrder=asc&maxResults=50",
+              "host": ["{{authBaseUrl}}"],
+              "path": ["engine-rest", "process-instance"],
+              "query": [
+                { "key": "sortBy", "value": "instanceId" },
+                { "key": "sortOrder", "value": "asc" },
+                { "key": "maxResults", "value": "50" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get by id",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/process-instance/{{processInstanceId}}", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "process-instance", "{{processInstanceId}}"] }
+          }
+        },
+        {
+          "name": "Get variables",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/process-instance/{{processInstanceId}}/variables", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "process-instance", "{{processInstanceId}}", "variables"] }
+          }
+        },
+        {
+          "name": "Delete",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/process-instance/{{processInstanceId}}", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "process-instance", "{{processInstanceId}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4 · Tasks (via Gateway)",
+      "item": [
+        {
+          "name": "List",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "const tasks = pm.response.json();",
+                  "if (Array.isArray(tasks) && tasks.length) {",
+                  "  pm.collectionVariables.set('taskId', tasks[0].id);",
+                  "  console.log('Captured taskId =', tasks[0].id, '|', tasks[0].name);",
+                  "} else { console.log('No tasks available.'); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": {
+              "raw": "{{authBaseUrl}}/engine-rest/task?sortBy=created&sortOrder=desc&maxResults=50",
+              "host": ["{{authBaseUrl}}"],
+              "path": ["engine-rest", "task"],
+              "query": [
+                { "key": "sortBy", "value": "created" },
+                { "key": "sortOrder", "value": "desc" },
+                { "key": "maxResults", "value": "50" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get by id",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/task/{{taskId}}", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "task", "{{taskId}}"] }
+          }
+        },
+        {
+          "name": "Claim",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "body": { "mode": "raw", "raw": "{\n  \"userId\": \"clerk:{{clerkSub}}\"\n}" },
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/task/{{taskId}}/claim", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "task", "{{taskId}}", "claim"] },
+            "description": "Claim for the current Clerk user (engine id clerk:<sub>). Requires TASK_WORK/UPDATE on Task."
+          }
+        },
+        {
+          "name": "Unclaim",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/task/{{taskId}}/unclaim", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "task", "{{taskId}}", "unclaim"] }
+          }
+        },
+        {
+          "name": "Set assignee",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "body": { "mode": "raw", "raw": "{\n  \"userId\": \"clerk:{{clerkSub}}\"\n}" },
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/task/{{taskId}}/assignee", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "task", "{{taskId}}", "assignee"] }
+          }
+        },
+        {
+          "name": "Form variables",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/task/{{taskId}}/form-variables", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "task", "{{taskId}}", "form-variables"] }
+          }
+        },
+        {
+          "name": "Complete",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "body": { "mode": "raw", "raw": "{\n  \"variables\": {\n    \"approved\": { \"value\": true, \"type\": \"Boolean\" }\n  }\n}" },
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/task/{{taskId}}/complete", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "task", "{{taskId}}", "complete"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5 · Deployments (via Gateway)",
+      "item": [
+        {
+          "name": "List",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "const deps = pm.response.json();",
+                  "if (Array.isArray(deps) && deps.length) {",
+                  "  pm.collectionVariables.set('deploymentId', deps[0].id);",
+                  "  console.log('Captured deploymentId =', deps[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": {
+              "raw": "{{authBaseUrl}}/engine-rest/deployment?sortBy=deploymentTime&sortOrder=desc&maxResults=50",
+              "host": ["{{authBaseUrl}}"],
+              "path": ["engine-rest", "deployment"],
+              "query": [
+                { "key": "sortBy", "value": "deploymentTime" },
+                { "key": "sortOrder", "value": "desc" },
+                { "key": "maxResults", "value": "50" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get by id",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/deployment/{{deploymentId}}", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "deployment", "{{deploymentId}}"] }
+          }
+        },
+        {
+          "name": "Get resources",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/deployment/{{deploymentId}}/resources", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "deployment", "{{deploymentId}}", "resources"] }
+          }
+        },
+        {
+          "name": "Create (multipart BPMN)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "deployment-name", "value": "postman-deploy", "type": "text" },
+                { "key": "deployment-source", "value": "postman", "type": "text" },
+                { "key": "tenant-id", "value": "{{tenantId}}", "type": "text" },
+                { "key": "data", "type": "file", "src": [] }
+              ]
+            },
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/deployment/create", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "deployment", "create"] },
+            "description": "Attach a .bpmn file to the `data` field. NOTE: DeploymentTenantFilter REQUIRES a non-blank, existing `tenant-id` — untenanted deploys are rejected (400). Requires DEPLOYMENT CREATE (deployer/tenant-admin)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6 · Decision Definitions (via Gateway)",
+      "item": [
+        {
+          "name": "List",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": {
+              "raw": "{{authBaseUrl}}/engine-rest/decision-definition?latestVersion=true",
+              "host": ["{{authBaseUrl}}"],
+              "path": ["engine-rest", "decision-definition"],
+              "query": [{ "key": "latestVersion", "value": "true" }]
+            }
+          }
+        },
+        {
+          "name": "Evaluate (by key)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "body": { "mode": "raw", "raw": "{\n  \"variables\": {\n    \"input1\": { \"value\": 42, \"type\": \"Integer\" }\n  }\n}" },
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/decision-definition/key/{{decisionKey}}/evaluate", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "decision-definition", "key", "{{decisionKey}}", "evaluate"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7 · History (via Gateway)",
+      "item": [
+        {
+          "name": "Historic process instances",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": {
+              "raw": "{{authBaseUrl}}/engine-rest/history/process-instance?sortBy=startTime&sortOrder=desc&maxResults=50",
+              "host": ["{{authBaseUrl}}"],
+              "path": ["engine-rest", "history", "process-instance"],
+              "query": [
+                { "key": "sortBy", "value": "startTime" },
+                { "key": "sortOrder", "value": "desc" },
+                { "key": "maxResults", "value": "50" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Historic activity instances (for instance)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Tenant-Id", "value": "{{tenantId}}" }],
+            "url": {
+              "raw": "{{authBaseUrl}}/engine-rest/history/activity-instance?processInstanceId={{processInstanceId}}&sortBy=startTime&sortOrder=asc",
+              "host": ["{{authBaseUrl}}"],
+              "path": ["engine-rest", "history", "activity-instance"],
+              "query": [
+                { "key": "processInstanceId", "value": "{{processInstanceId}}" },
+                { "key": "sortBy", "value": "startTime" },
+                { "key": "sortOrder", "value": "asc" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "8 · Engine Admin — DIRECT (Basic auth)",
+      "description": "Operator-only endpoints. These use HTTP Basic ({{operatorUser}}/{{operatorPass}}) and target the ENGINE directly ({{engineBaseUrl}}) — they CANNOT go through the gateway, which only accepts Clerk Bearer tokens. The Camunda admin password is generateValue per env on Render; retrieve it from the dashboard for cloud envs.",
+      "auth": {
+        "type": "basic",
+        "basic": [
+          { "key": "username", "value": "{{operatorUser}}", "type": "string" },
+          { "key": "password", "value": "{{operatorPass}}", "type": "string" }
+        ]
+      },
+      "item": [
+        {
+          "name": "Onboard Clerk User",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"clerkSub\": \"{{clerkSub}}\",\n  \"firstName\": \"Jane\",\n  \"lastName\": \"Doe\",\n  \"email\": \"jane@example.com\",\n  \"tenantId\": \"{{tenantId}}\",\n  \"role\": \"tenant-user\",\n  \"accessLevel\": \"READ_WRITE\"\n}"
+            },
+            "url": { "raw": "{{engineBaseUrl}}/api/admin/onboard-clerk-user", "host": ["{{engineBaseUrl}}"], "path": ["api", "admin", "onboard-clerk-user"] },
+            "description": "Provision a Clerk user in the engine (userId = clerk:<clerkSub>) with a tenant membership + role. Run ONCE per user before they use the gateway, else they get 403 'not provisioned'. clerkSub must equal the Clerk token's `sub`. role ∈ {tenant-admin, tenant-user, task-worker, process-operator, deployer}; accessLevel ∈ {READ_WRITE, READ_ONLY}."
+          }
+        },
+        {
+          "name": "Onboard Basic User (operator/core-ui)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"jdoe\",\n  \"firstName\": \"Jane\",\n  \"lastName\": \"Doe\",\n  \"email\": \"jane@example.com\",\n  \"password\": \"change-me\",\n  \"tenantId\": \"{{tenantId}}\",\n  \"role\": \"tenant-user\",\n  \"accessLevel\": \"READ_WRITE\"\n}"
+            },
+            "url": { "raw": "{{engineBaseUrl}}/api/admin/onboard-user", "host": ["{{engineBaseUrl}}"], "path": ["api", "admin", "onboard-user"] },
+            "description": "Create a Basic-auth (non-Clerk) user — e.g. for core-ui operators. These users authenticate with id/password directly against the engine."
+          }
+        },
+        {
+          "name": "Who am I (Basic, direct)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{engineBaseUrl}}/api/me", "host": ["{{engineBaseUrl}}"], "path": ["api", "me"] }
+          }
+        },
+        {
+          "name": "List tenants",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{engineBaseUrl}}/engine-rest/tenant", "host": ["{{engineBaseUrl}}"], "path": ["engine-rest", "tenant"] }
+          }
+        },
+        {
+          "name": "Create tenant",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Generate tenant id: TE-<4-char UUID>-<DDMONYY>  e.g. TE-9F3A-02JUN26",
+                  "var uuid = (typeof crypto !== 'undefined' && crypto.randomUUID)",
+                  "  ? crypto.randomUUID()",
+                  "  : pm.variables.replaceIn('{{$guid}}');",
+                  "var seg = uuid.replace(/-/g, '').slice(0, 4).toUpperCase();",
+                  "var d = new Date();",
+                  "var MON = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];",
+                  "var datePart = String(d.getDate()).padStart(2, '0') + MON[d.getMonth()] + String(d.getFullYear()).slice(-2);",
+                  "var tenantId = 'TE-' + seg + '-' + datePart;",
+                  "pm.collectionVariables.set('tenantId', tenantId);",
+                  "try { pm.environment.set('tenantId', tenantId); } catch (e) {}",
+                  "console.log('Generated tenantId =', tenantId, '(replicate this format in the UI)');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"id\": \"{{tenantId}}\",\n  \"name\": \"Tenant {{tenantId}}\"\n}" },
+            "url": { "raw": "{{engineBaseUrl}}/engine-rest/tenant/create", "host": ["{{engineBaseUrl}}"], "path": ["engine-rest", "tenant", "create"] },
+            "description": "Pre-request script generates a tenant id of the form TE-<4charUUID>-DDMONYY (e.g. TE-9F3A-02JUN26) and stores it in {{tenantId}}, which the onboard + resource requests reuse. The id matches the engine resource whitelist [a-zA-Z0-9_\\-]+. Use the SAME format when creating a tenant via the UI."
+          }
+        },
+        {
+          "name": "List groups (roles + orgs)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{engineBaseUrl}}/engine-rest/group", "host": ["{{engineBaseUrl}}"], "path": ["engine-rest", "group"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "9 · Auth behavior checks",
+      "description": "Demonstrate the gateway's gate. These should NOT 200.",
+      "item": [
+        {
+          "name": "Gateway with NO token → 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.code === 401);",
+                  "console.log('Gateway correctly rejects requests with no Clerk Bearer token.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/task", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "task"] }
+          }
+        },
+        {
+          "name": "Basic auth to GATEWAY → 401 (must use engine direct)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.code === 401);",
+                  "console.log('Gateway only accepts Clerk Bearer — Basic must go to the engine directly.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "basic",
+              "basic": [
+                { "key": "username", "value": "{{operatorUser}}", "type": "string" },
+                { "key": "password", "value": "{{operatorPass}}", "type": "string" }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{authBaseUrl}}/engine-rest/task", "host": ["{{authBaseUrl}}"], "path": ["engine-rest", "task"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Z · Clerk — Mint Bearer (Backend API)",
+      "description": "Generate the {{clerkJwt}} Bearer token via Clerk's Backend API instead of the browser.\n\nPrereqs:\n- Set {{clerkSecretKey}} to your Clerk SECRET key (sk_test_…) from Dashboard → API Keys. NEVER commit it.\n- An ACTIVE session must exist — sign into the consumer UI once (sessions persist for days).\n\nRun the three requests top-to-bottom: they capture userId → sessionId → mint a JWT and set it into {{clerkJwt}} automatically. Then any gateway request (folders 1–7) just works until the token expires (~60s) — re-run request 3 to refresh.",
+      "auth": {
+        "type": "bearer",
+        "bearer": [{ "key": "token", "value": "{{clerkSecretKey}}", "type": "string" }]
+      },
+      "item": [
+        {
+          "name": "0 · Create user → capture userId/clerkSub",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200/201', () => [200,201].includes(pm.response.code));",
+                  "if ([200,201].includes(pm.response.code)) {",
+                  "  const u = pm.response.json();",
+                  "  pm.collectionVariables.set('userId', u.id);",
+                  "  pm.collectionVariables.set('clerkSub', u.id);",
+                  "  console.log('Created user', u.id, '— now ONBOARD it (folder 8) then establish a session (Z2 or UI) before minting a token.');",
+                  "} else {",
+                  "  console.log('Create failed:', pm.response.text());",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email_address\": [\"{{newUserEmail}}\"],\n  \"password\": \"{{newUserPassword}}\",\n  \"first_name\": \"Jane\",\n  \"last_name\": \"Doe\",\n  \"skip_password_checks\": true\n}"
+            },
+            "url": { "raw": "{{clerkApiBase}}/v1/users", "host": ["{{clerkApiBase}}"], "path": ["v1", "users"] },
+            "description": "Create a Clerk user via the Backend API. Set {{newUserEmail}} and {{newUserPassword}} first. The returned id is the Clerk `sub`; the engine userId becomes clerk:<id>. NOTE: this user has NO session yet — you cannot mint a token until a session exists (do Z2 'Sign in via API' or sign into the UI once)."
+          }
+        },
+        {
+          "name": "1 · List users → capture userId",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "const users = pm.response.json();",
+                  "if (Array.isArray(users) && users.length) {",
+                  "  pm.collectionVariables.set('userId', users[0].id);",
+                  "  const sub = users[0].id;",
+                  "  pm.collectionVariables.set('clerkSub', sub);",
+                  "  const email = (users[0].email_addresses && users[0].email_addresses[0] && users[0].email_addresses[0].email_address) || '';",
+                  "  console.log('Captured userId/clerkSub =', sub, '|', email);",
+                  "} else { console.log('No users found in this Clerk instance.'); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{clerkApiBase}}/v1/users?limit=10&order_by=-created_at",
+              "host": ["{{clerkApiBase}}"],
+              "path": ["v1", "users"],
+              "query": [
+                { "key": "limit", "value": "10" },
+                { "key": "order_by", "value": "-created_at" }
+              ]
+            },
+            "description": "Lists users. Pick the one you signed in as; its id is the Clerk `sub` (and the engine userId becomes clerk:<sub>). Tip: add &email_address=you@example.com to filter."
+          }
+        },
+        {
+          "name": "2 · List active sessions → capture sessionId",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "const sessions = pm.response.json();",
+                  "if (Array.isArray(sessions) && sessions.length) {",
+                  "  pm.collectionVariables.set('sessionId', sessions[0].id);",
+                  "  console.log('Captured sessionId =', sessions[0].id, '| status:', sessions[0].status);",
+                  "} else {",
+                  "  console.log('No ACTIVE session — sign into the consumer UI once, then re-run.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{clerkApiBase}}/v1/sessions?status=active&user_id={{userId}}",
+              "host": ["{{clerkApiBase}}"],
+              "path": ["v1", "sessions"],
+              "query": [
+                { "key": "status", "value": "active" },
+                { "key": "user_id", "value": "{{userId}}" }
+              ]
+            },
+            "description": "Active sessions for the user. Requires the user to have signed in via the UI at least once."
+          }
+        },
+        {
+          "name": "3 · Mint session token → set clerkJwt",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200/201', () => [200,201].includes(pm.response.code));",
+                  "const body = pm.response.json();",
+                  "if (body && body.jwt) {",
+                  "  pm.collectionVariables.set('clerkJwt', body.jwt);",
+                  "  pm.environment.set('clerkJwt', body.jwt);",
+                  "  console.log('Set clerkJwt (expires ~60s). Re-run this request to refresh.');",
+                  "} else {",
+                  "  console.log('No jwt in response:', JSON.stringify(body));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": {
+              "raw": "{{clerkApiBase}}/v1/sessions/{{sessionId}}/tokens",
+              "host": ["{{clerkApiBase}}"],
+              "path": ["v1", "sessions", "{{sessionId}}", "tokens"]
+            },
+            "description": "Mints a fresh ~60s session JWT signed by your Clerk instance — verifiable by the gateway against Clerk's JWKS. Writes it into both the collection and the active environment's clerkJwt. Re-run to refresh when you get 401s."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Z2 · Clerk — Sign in via API (no browser)",
+      "description": "Establish a session for an API-created user WITHOUT a browser, using Clerk's Frontend API (FAPI). Run 1→2→3. Then use folder Z request 3 (or this folder's request 3) to mint tokens.\n\nSet {{clerkFapiBase}} (your Clerk Frontend API origin, e.g. https://gorgeous-seal-77.clerk.accounts.dev), {{newUserEmail}}, {{newUserPassword}}.\n\nNOTE: FAPI on DEV instances requires a dev-browser token (request 1) appended as __clerk_db_jwt. Clerk auto-sets a __client cookie that Postman stores/resends. If Clerk changes FAPI shapes and a step fails, fall back to signing into the consumer UI once with this user's email/password — that also creates the session, after which folder Z works. No secret key is used here (FAPI is public + cookie-based).",
+      "auth": { "type": "noauth" },
+      "item": [
+        {
+          "name": "1 · Dev browser token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "const tok = j.token || j.id || (j.response && (j.response.token || j.response.id));",
+                  "if (tok) { pm.collectionVariables.set('devBrowserToken', tok); console.log('devBrowserToken captured.'); }",
+                  "else { console.log('Could not find dev browser token in:', JSON.stringify(j)); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{clerkFapiBase}}/v1/dev_browser?_clerk_js_version=5",
+              "host": ["{{clerkFapiBase}}"],
+              "path": ["v1", "dev_browser"],
+              "query": [{ "key": "_clerk_js_version", "value": "5" }]
+            },
+            "description": "Dev instances require a dev-browser token for FAPI calls. Production instances don't — skip this and drop the __clerk_db_jwt query param."
+          }
+        },
+        {
+          "name": "2 · Sign in (password) → capture sessionId",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "const r = j.response || j;",
+                  "const sid = r.created_session_id || (r.session && r.session.id);",
+                  "if (sid) { pm.collectionVariables.set('sessionId', sid); console.log('sessionId =', sid, '| status:', r.status); }",
+                  "else { console.log('Sign-in not complete. status:', r.status, '|', JSON.stringify(j).slice(0,400)); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "strategy", "value": "password", "type": "text" },
+                { "key": "identifier", "value": "{{newUserEmail}}", "type": "text" },
+                { "key": "password", "value": "{{newUserPassword}}", "type": "text" }
+              ]
+            },
+            "url": {
+              "raw": "{{clerkFapiBase}}/v1/client/sign_ins?_clerk_js_version=5&__clerk_db_jwt={{devBrowserToken}}",
+              "host": ["{{clerkFapiBase}}"],
+              "path": ["v1", "client", "sign_ins"],
+              "query": [
+                { "key": "_clerk_js_version", "value": "5" },
+                { "key": "__clerk_db_jwt", "value": "{{devBrowserToken}}" }
+              ]
+            },
+            "description": "Single-shot password sign-in (identifier + password together). On success, response.created_session_id is the new session. Postman stores the __client cookie automatically."
+          }
+        },
+        {
+          "name": "3 · Mint token → set clerkJwt",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "const jwt = j.jwt || (j.response && j.response.jwt);",
+                  "if (jwt) {",
+                  "  pm.collectionVariables.set('clerkJwt', jwt);",
+                  "  pm.environment.set('clerkJwt', jwt);",
+                  "  console.log('clerkJwt set (≈60s). Re-run to refresh.');",
+                  "} else { console.log('No jwt:', JSON.stringify(j).slice(0,400)); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{clerkFapiBase}}/v1/client/sessions/{{sessionId}}/tokens?_clerk_js_version=5&__clerk_db_jwt={{devBrowserToken}}",
+              "host": ["{{clerkFapiBase}}"],
+              "path": ["v1", "client", "sessions", "{{sessionId}}", "tokens"],
+              "query": [
+                { "key": "_clerk_js_version", "value": "5" },
+                { "key": "__clerk_db_jwt", "value": "{{devBrowserToken}}" }
+              ]
+            },
+            "description": "Mints the session JWT via FAPI (cookie + dev-browser authenticated). This is the same kind of token the browser SDK produces. Set it as {{clerkJwt}} and call the gateway."
+          }
+        }
+      ]
+    }
+  ]
+}

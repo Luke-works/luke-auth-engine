@@ -12,6 +12,25 @@ luke:
     core-engine:
       base-url: ${CORE_ENGINE_URL:http://localhost:8080}
 
+    # ── capability-engine (capability access read for /session) ─────────────
+    capability-engine:
+      base-url: ${CAPABILITIES_BASE_URL:http://localhost:8082}
+
+    # ── /session translator ─────────────────────────────────────────────────
+    # dev-mode allows an X-Dev-User header to stand in for a verified Clerk
+    # token — LOCAL TESTING ONLY; never enable in shared/prod environments.
+    dev-mode: ${LUKE_AUTH_DEV_MODE:false}
+    session:
+      cache-ttl-seconds: ${SESSION_CACHE_TTL:60}
+
+    # ── Service accounts (robots, no Clerk) ─────────────────────────────────
+    # Comma-separated key=userId pairs. A service POSTs /service/token with
+    # X-Service-Key and gets an act-as token for its userId (which must be
+    # provisioned in the engine like a human). e.g.
+    #   LUKE_AUTH_SERVICE_KEYS=s3cret1=svc:order-bot,s3cret2=svc:billing
+    service:
+      keys: ${LUKE_AUTH_SERVICE_KEYS:}
+
     # ── Clerk (authentication) ──────────────────────────────────────────────
     # JWKS endpoint of your Clerk instance. For a dev instance it is
     #   https://<frontend-api>.clerk.accounts.dev/.well-known/jwks.json

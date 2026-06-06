@@ -67,6 +67,7 @@ public class SessionService {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("userId", engineUserId);
         body.put("operator", operator);
+        body.put("tenantAdmin", Boolean.TRUE.equals(core.get("tenantAdmin")));
         body.put("tenant", tenant);
         body.put("tenants", tenants);
         body.put("roles", roles);

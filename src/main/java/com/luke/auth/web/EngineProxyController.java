@@ -58,13 +58,17 @@ public class EngineProxyController {
     private final String coreEngineBaseUrl;
     private final HttpClient httpClient;
 
+    private final boolean devMode;
+
     public EngineProxyController(ClerkTokenVerifier clerkVerifier,
                                  IdentityResolver identityResolver,
                                  GatewayKeys gatewayKeys,
-                                 @Value("${luke.auth.core-engine.base-url}") String coreEngineBaseUrl) {
+                                 @Value("${luke.auth.core-engine.base-url}") String coreEngineBaseUrl,
+                                 @Value("${luke.auth.dev-mode:false}") boolean devMode) {
         this.clerkVerifier = clerkVerifier;
         this.identityResolver = identityResolver;
         this.gatewayKeys = gatewayKeys;
+        this.devMode = devMode;
         this.coreEngineBaseUrl = stripTrailingSlash(coreEngineBaseUrl);
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
@@ -82,17 +86,25 @@ public class EngineProxyController {
         }
 
         // ── 1. Authenticate: verify the Clerk wristband ───────────────────────
-        String engineUserId;
-        try {
-            String clerkToken = bearerToken(request);
-            if (clerkToken == null) {
-                return unauthorized("Missing Bearer token");
+        String engineUserId = null;
+        String clerkToken = bearerToken(request);
+        if (clerkToken != null) {
+            try {
+                engineUserId = identityResolver.toEngineUserId(clerkVerifier.verify(clerkToken).getSubject());
+            } catch (JwtException | IllegalArgumentException e) {
+                log.debug("Rejected request: {}", e.getMessage());
             }
-            Jwt clerk = clerkVerifier.verify(clerkToken);
-            engineUserId = identityResolver.toEngineUserId(clerk.getSubject());
-        } catch (JwtException | IllegalArgumentException e) {
-            log.debug("Rejected request: {}", e.getMessage());
-            return unauthorized("Invalid or expired token");
+        }
+        // Dev-mode fallback (local only): an X-Dev-User header stands in for a
+        // verified Clerk token, mirroring /session. Never enable in prod.
+        if (engineUserId == null && devMode) {
+            String dev = request.getHeader("X-Dev-User");
+            if (dev != null && !dev.isBlank()) {
+                engineUserId = dev.trim();
+            }
+        }
+        if (engineUserId == null) {
+            return unauthorized(clerkToken == null ? "Missing Bearer token" : "Invalid or expired token");
         }
 
         // ── 2. Mint the act-as-user badge ─────────────────────────────────────

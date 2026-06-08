@@ -45,16 +45,19 @@ public class WorkosClient {
     private final String clientId;
     private final String apiKey;
     private final String redirectUri;
+    private final boolean markEmailVerified;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
     public WorkosClient(@Value("${luke.auth.workos.api-base-url:https://api.workos.com}") String apiBase,
                         @Value("${luke.auth.workos.client-id:}") String clientId,
                         @Value("${luke.auth.workos.api-key:}") String apiKey,
-                        @Value("${luke.auth.workos.redirect-uri:http://localhost:8083/auth/callback}") String redirectUri) {
+                        @Value("${luke.auth.workos.redirect-uri:http://localhost:8083/auth/callback}") String redirectUri,
+                        @Value("${luke.auth.workos.mark-email-verified-on-register:true}") boolean markEmailVerified) {
         this.apiBase = strip(apiBase);
         this.clientId = clientId;
         this.apiKey = apiKey;
         this.redirectUri = redirectUri;
+        this.markEmailVerified = markEmailVerified;
     }
 
     // ── Management: create a user (Bearer API key) ──────────────────────────
@@ -66,6 +69,12 @@ public class WorkosClient {
         if (password != null && !password.isBlank()) body.put("password", password);
         if (firstName != null && !firstName.isBlank()) body.put("first_name", firstName);
         if (lastName != null && !lastName.isBlank()) body.put("last_name", lastName);
+        // TEST-ONLY until a real /auth/verify flow exists: WorkOS requires the email
+        // to be verified before password authentication, but disabling the verification
+        // *email* in the dashboard does not lift that requirement — so for a headless
+        // sign-up we mark the user verified at creation. Flip mark-email-verified-on-register
+        // to false once email verification is implemented.
+        if (markEmailVerified) body.put("email_verified", true);
         return postJson(USERS_PATH, body, /*bearer=*/true);
     }
 

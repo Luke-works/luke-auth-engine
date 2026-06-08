@@ -54,6 +54,10 @@ luke:
       # use SameSite=None (+ Secure) only if the UI is on a cross-site domain.
       cookie-secure: ${WORKOS_COOKIE_SECURE:true}
       cookie-same-site: ${WORKOS_COOKIE_SAMESITE:Lax}
+      # TEST-ONLY: create users already email-verified so password login isn't blocked
+      # (WorkOS requires verified email for password auth; disabling the verification
+      # email in the dashboard does NOT lift that). Set false once /auth/verify exists.
+      mark-email-verified-on-register: ${WORKOS_MARK_EMAIL_VERIFIED:true}
 
     # ── Self-service provisioning (optional) ────────────────────────────────
     # If set, /auth/register provisions the new user into core-engine via the

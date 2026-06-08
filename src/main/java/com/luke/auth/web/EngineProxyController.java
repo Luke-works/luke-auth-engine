@@ -46,11 +46,20 @@ public class EngineProxyController {
 
     private static final Logger log = LoggerFactory.getLogger(EngineProxyController.class);
 
-    /** Hop-by-hop / managed headers we must not copy verbatim between hops. */
+    /** Hop-by-hop / managed request headers we must not copy verbatim between hops.
+     *  accept-encoding is dropped so the engine never gzips (no encoding edge cases). */
     private static final Set<String> SKIP_REQUEST_HEADERS = Set.of(
-            "host", "authorization", "content-length", "connection", "transfer-encoding", "expect");
-    private static final Set<String> SKIP_RESPONSE_HEADERS = Set.of(
-            "transfer-encoding", "content-length", "connection");
+            "host", "authorization", "content-length", "connection", "transfer-encoding",
+            "expect", "accept-encoding");
+
+    /** ONLY these upstream response headers are relayed. The engine sits behind its own
+     *  Render/Cloudflare edge, so its responses carry infra headers (server, alt-svc,
+     *  cf-ray, cf-cache-status, rndr-id, …). Copying those back collides with THIS
+     *  service's edge and makes it return 502 — so we allowlist safe content headers only
+     *  (CORS is added by this service's own CorsFilter, not relayed from the engine). */
+    private static final Set<String> RELAY_RESPONSE_HEADERS = Set.of(
+            "content-type", "cache-control", "etag", "last-modified",
+            "location", "content-disposition", "www-authenticate", "retry-after");
 
     private final WorkosTokenVerifier workosVerifier;
     private final IdentityResolver identityResolver;
@@ -165,7 +174,7 @@ public class EngineProxyController {
         ResponseEntity.BodyBuilder builder = ResponseEntity.status(upstream.statusCode());
         for (Map.Entry<String, List<String>> header : upstream.headers().map().entrySet()) {
             String name = header.getKey();
-            if (name == null || SKIP_RESPONSE_HEADERS.contains(name.toLowerCase())) {
+            if (name == null || !RELAY_RESPONSE_HEADERS.contains(name.toLowerCase())) {
                 continue;
             }
             for (String value : header.getValue()) {

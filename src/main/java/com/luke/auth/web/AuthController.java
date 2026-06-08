@@ -19,7 +19,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.CookieValue;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -90,6 +92,8 @@ public class AuthController {
 
     public record RegisterRequest(String email, String password, String firstName, String lastName) {}
     public record LoginRequest(String email, String password) {}
+    public record ProfileRequest(String firstName, String lastName) {}
+    public record PasswordRequest(String currentPassword, String newPassword) {}
 
     // ── Register ────────────────────────────────────────────────────────────
 
@@ -117,6 +121,7 @@ public class AuthController {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("userId", engineUserId);
             body.put("workosUserId", workosUserId);
+            body.put("user", userView(user));
             body.put("verifyRequired", !Boolean.TRUE.equals(user.get("email_verified")));
             return ResponseEntity.status(HttpStatus.CREATED).body(body);
         } catch (WorkosClient.WorkosException e) {
@@ -217,6 +222,60 @@ public class AuthController {
         return ResponseEntity.ok(body);
     }
 
+    // ── Account management (authenticated; acts on the token's WorkOS user) ──
+
+    @PatchMapping("/profile")
+    public ResponseEntity<?> updateProfile(@RequestBody ProfileRequest req, HttpServletRequest request) {
+        String userId = requireWorkosUserId(request);
+        if (userId == null) return error(HttpStatus.UNAUTHORIZED, "Unauthorized", "Missing or invalid token");
+        Map<String, Object> fields = new LinkedHashMap<>();
+        if (req.firstName() != null) fields.put("first_name", req.firstName());
+        if (req.lastName() != null) fields.put("last_name", req.lastName());
+        if (fields.isEmpty()) return error(HttpStatus.BAD_REQUEST, "Bad Request", "Nothing to update");
+        try {
+            Map<String, Object> updated = workos.updateUser(userId, fields);
+            return ResponseEntity.ok(Map.of("user", userView(updated)));
+        } catch (WorkosClient.WorkosException e) {
+            return error(HttpStatus.valueOf(normalize(e.status())), "Update failed", e.getMessage());
+        }
+    }
+
+    @PostMapping("/password")
+    public ResponseEntity<?> changePassword(@RequestBody PasswordRequest req, HttpServletRequest request) {
+        String userId = requireWorkosUserId(request);
+        if (userId == null) return error(HttpStatus.UNAUTHORIZED, "Unauthorized", "Missing or invalid token");
+        if (isBlank(req.newPassword())) return error(HttpStatus.BAD_REQUEST, "Bad Request", "newPassword is required");
+        try {
+            // Verify the current password by re-authenticating (needs the user's email).
+            String email = str(workos.getUser(userId).get("email"));
+            if (email == null) return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", "Could not resolve user");
+            if (!isBlank(req.currentPassword())) {
+                try {
+                    workos.authenticateWithPassword(email, req.currentPassword());
+                } catch (WorkosClient.WorkosException e) {
+                    return error(HttpStatus.FORBIDDEN, "Forbidden", "Current password is incorrect");
+                }
+            }
+            workos.updateUser(userId, Map.of("password", req.newPassword()));
+            return ResponseEntity.ok(Map.of("ok", true));
+        } catch (WorkosClient.WorkosException e) {
+            return error(HttpStatus.valueOf(normalize(e.status())), "Password change failed", e.getMessage());
+        }
+    }
+
+    @DeleteMapping("/account")
+    public ResponseEntity<?> deleteAccount(HttpServletRequest request, HttpServletResponse response) {
+        String userId = requireWorkosUserId(request);
+        if (userId == null) return error(HttpStatus.UNAUTHORIZED, "Unauthorized", "Missing or invalid token");
+        try {
+            workos.deleteUser(userId);
+        } catch (WorkosClient.WorkosException e) {
+            return error(HttpStatus.valueOf(normalize(e.status())), "Delete failed", e.getMessage());
+        }
+        clearRefreshCookie(response);
+        return ResponseEntity.ok(Map.of("ok", true));
+    }
+
     // ────────────────────────────────────────────────────────────────────────
 
     /**
@@ -236,9 +295,13 @@ public class AuthController {
         String engineUserId = identityResolver.toEngineUserId(jwt.getSubject());
         String sid = jwt.getClaimAsString("sid");
 
+        @SuppressWarnings("unchecked")
+        Map<String, Object> wuser = (auth.get("user") instanceof Map) ? (Map<String, Object>) auth.get("user") : null;
+
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("accessToken", accessToken);
         body.put("sid", sid);
+        body.put("user", userView(wuser));
         try {
             body.put("session", sessionService.session(engineUserId, tenant));
         } catch (SessionService.TenantForbiddenException e) {
@@ -273,6 +336,30 @@ public class AuthController {
     private static boolean isBlank(String s) { return s == null || s.isBlank(); }
 
     private static String str(Object o) { return o == null ? null : String.valueOf(o); }
+
+    /** Map a WorkOS user object to the UI-facing shape (camelCase, null-safe). */
+    private static Map<String, Object> userView(Map<String, Object> u) {
+        Map<String, Object> v = new LinkedHashMap<>();
+        if (u == null) return v;
+        v.put("id", u.get("id"));
+        v.put("email", u.get("email"));
+        v.put("firstName", u.get("first_name"));
+        v.put("lastName", u.get("last_name"));
+        v.put("profilePictureUrl", u.get("profile_picture_url"));
+        v.put("emailVerified", u.get("email_verified"));
+        return v;
+    }
+
+    /** Verified WorkOS user id (the access token's {@code sub}) from the Bearer header, or null. */
+    private String requireWorkosUserId(HttpServletRequest request) {
+        String header = request.getHeader(HttpHeaders.AUTHORIZATION);
+        if (header == null || !header.regionMatches(true, 0, "Bearer ", 0, 7)) return null;
+        try {
+            return verifier.verify(header.substring(7).trim()).getSubject();
+        } catch (Exception e) {
+            return null;
+        }
+    }
 
     /** Clamp an upstream status into a sane client-facing code. */
     private static int normalize(int status) {

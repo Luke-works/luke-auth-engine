@@ -78,6 +78,21 @@ public class WorkosClient {
         return postJson(USERS_PATH, body, /*bearer=*/true);
     }
 
+    /** Fetch a WorkOS user by id (read {@code "email"}, {@code "first_name"}, …). */
+    public Map<String, Object> getUser(String userId) {
+        return sendJson("GET", USERS_PATH + "/" + userId, null, /*bearer=*/true);
+    }
+
+    /** Update a user's mutable fields (e.g. {@code first_name}, {@code last_name}, {@code password}). */
+    public Map<String, Object> updateUser(String userId, Map<String, Object> fields) {
+        return sendJson("PUT", USERS_PATH + "/" + userId, fields, /*bearer=*/true);
+    }
+
+    /** Permanently delete a WorkOS user. */
+    public void deleteUser(String userId) {
+        sendJson("DELETE", USERS_PATH + "/" + userId, null, /*bearer=*/true);
+    }
+
     // ── Authenticate: password / authorization_code / refresh_token ─────────
 
     /** Email + password login. Returns {@code {user, access_token, refresh_token, ...}}. */
@@ -137,13 +152,20 @@ public class WorkosClient {
     }
 
     private Map<String, Object> postJson(String path, Map<String, Object> body, boolean bearer) {
+        return sendJson("POST", path, body, bearer);
+    }
+
+    /** Generic JSON request. {@code body} null → no request body (GET/DELETE). */
+    private Map<String, Object> sendJson(String method, String path, Map<String, Object> body, boolean bearer) {
         try {
-            byte[] json = MAPPER.writeValueAsBytes(body);
+            HttpRequest.BodyPublisher pub = (body == null)
+                    ? HttpRequest.BodyPublishers.noBody()
+                    : HttpRequest.BodyPublishers.ofByteArray(MAPPER.writeValueAsBytes(body));
             HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(apiBase + path))
                     .timeout(Duration.ofSeconds(15))
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofByteArray(json));
+                    .method(method, pub);
             if (bearer) {
                 b.header("Authorization", "Bearer " + apiKey);
             }

@@ -68,13 +68,13 @@ public class PermissionsClient {
         try {
             HttpResponse<byte[]> res = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
             if (res.statusCode() / 100 != 2) {
-                throw new UpstreamException(req.uri().getPath() + " returned " + res.statusCode());
+                throw new UpstreamException(res.statusCode(), req.uri().getPath() + " returned " + res.statusCode());
             }
             return MAPPER.readValue(res.body(), type);
         } catch (UpstreamException e) {
             throw e;
         } catch (Exception e) {
-            throw new UpstreamException("Failed calling " + req.uri() + ": " + e.getMessage());
+            throw new UpstreamException(0, "Failed calling " + req.uri() + ": " + e.getMessage());
         }
     }
 
@@ -82,8 +82,14 @@ public class PermissionsClient {
         return url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
     }
 
-    /** A source of truth was unreachable or errored. */
+    /** A source of truth was unreachable or errored. {@code status} is the upstream
+     *  HTTP status (0 if the call never completed). */
     public static class UpstreamException extends RuntimeException {
-        public UpstreamException(String message) { super(message); }
+        private final int status;
+        public UpstreamException(int status, String message) {
+            super(message);
+            this.status = status;
+        }
+        public int status() { return status; }
     }
 }

@@ -48,7 +48,20 @@ public class SessionService {
 
         // 1. Camunda view — called as the user via a minted act-as token.
         String actAs = gatewayKeys.mintActAsToken(engineUserId);
-        Map<String, Object> core = client.corePermissions(actAs);
+        Map<String, Object> core;
+        try {
+            core = client.corePermissions(actAs);
+        } catch (PermissionsClient.UpstreamException e) {
+            // A brand-new (authenticated but not-yet-onboarded) user gets a 403 from
+            // core-engine. That is not an error for login — return a minimal session so
+            // the user can sign in and then create their organization (self-service).
+            if (e.status() == 403) {
+                Map<String, Object> empty = unprovisioned(engineUserId);
+                cache.put(cacheKey, new Cached(empty, now + cacheTtlMillis));
+                return empty;
+            }
+            throw e;
+        }
 
         @SuppressWarnings("unchecked")
         List<String> tenants = (List<String>) core.getOrDefault("tenants", List.of());
@@ -66,6 +79,7 @@ public class SessionService {
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("userId", engineUserId);
+        body.put("provisioned", true);
         body.put("operator", operator);
         body.put("tenantAdmin", Boolean.TRUE.equals(core.get("tenantAdmin")));
         body.put("tenant", tenant);
@@ -76,6 +90,26 @@ public class SessionService {
         body.put("can", flatten(roles, capabilities));
 
         cache.put(cacheKey, new Cached(body, now + cacheTtlMillis));
+        return body;
+    }
+
+    /**
+     * Minimal session for an authenticated-but-not-yet-onboarded user: identity only,
+     * no tenants/roles/capabilities. {@code provisioned:false} tells the UI to route the
+     * user into "create your organization" rather than the app.
+     */
+    private Map<String, Object> unprovisioned(String engineUserId) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("userId", engineUserId);
+        body.put("provisioned", false);
+        body.put("operator", false);
+        body.put("tenantAdmin", false);
+        body.put("tenant", null);
+        body.put("tenants", List.of());
+        body.put("roles", Map.of());
+        body.put("candidateGroups", List.of());
+        body.put("capabilities", Map.of());
+        body.put("can", List.of());
         return body;
     }
 

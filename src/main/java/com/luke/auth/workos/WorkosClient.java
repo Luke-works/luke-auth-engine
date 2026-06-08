@@ -40,6 +40,7 @@ public class WorkosClient {
     private static final String AUTHENTICATE_PATH = "/user_management/authenticate";
     private static final String AUTHORIZE_PATH    = "/user_management/authorize";
     private static final String LOGOUT_PATH       = "/user_management/sessions/logout";
+    private static final String INVITATIONS_PATH  = "/user_management/invitations";
 
     private final String apiBase;
     private final String clientId;
@@ -91,6 +92,39 @@ public class WorkosClient {
     /** Permanently delete a WorkOS user. */
     public void deleteUser(String userId) {
         sendJson("DELETE", USERS_PATH + "/" + userId, null, /*bearer=*/true);
+    }
+
+    /** Look up a WorkOS user by email (exact match). Returns the user object or null. */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> findUserByEmail(String email) {
+        Map<String, Object> res = sendJson("GET", USERS_PATH + "?email=" + enc(email), null, /*bearer=*/true);
+        Object data = res.get("data");
+        if (data instanceof java.util.List<?> list && !list.isEmpty() && list.get(0) instanceof Map) {
+            return (Map<String, Object>) list.get(0);
+        }
+        return null;
+    }
+
+    // ── Invitations: email a teammate a link to join (set their password) ───
+
+    /** Send a WorkOS invitation email. Returns the invitation object (read {@code "id"}). */
+    public Map<String, Object> sendInvitation(String email, String inviterUserId) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("email", email);
+        if (inviterUserId != null && !inviterUserId.isBlank()) body.put("inviter_user_id", inviterUserId);
+        return postJson(INVITATIONS_PATH, body, /*bearer=*/true);
+    }
+
+    /** List invitations, optionally filtered to a single email. Returns {@code {data:[...], ...}}. */
+    public Map<String, Object> listInvitations(String email) {
+        String path = INVITATIONS_PATH + "?order=desc&limit=50";
+        if (email != null && !email.isBlank()) path += "&email=" + enc(email);
+        return sendJson("GET", path, null, /*bearer=*/true);
+    }
+
+    /** Revoke a pending invitation. */
+    public Map<String, Object> revokeInvitation(String invitationId) {
+        return postJson(INVITATIONS_PATH + "/" + invitationId + "/revoke", new LinkedHashMap<>(), /*bearer=*/true);
     }
 
     // ── Authenticate: password / authorization_code / refresh_token ─────────

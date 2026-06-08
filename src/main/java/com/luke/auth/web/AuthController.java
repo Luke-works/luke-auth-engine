@@ -1,5 +1,6 @@
 package com.luke.auth.web;
 
+import com.luke.auth.config.GatewayKeys;
 import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
 import com.luke.auth.session.PermissionsClient;
@@ -9,7 +10,9 @@ import com.luke.auth.workos.WorkosClient;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,7 +24,9 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.CookieValue;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -67,6 +72,8 @@ public class AuthController {
     private final IdentityResolver identityResolver;
     private final OnboardingClient onboarding;
     private final SessionService sessionService;
+    private final GatewayKeys gatewayKeys;
+    private final CoreAdminClient coreAdmin;
 
     private final String uiCallbackUrl;
     private final boolean cookieSecure;
@@ -77,6 +84,8 @@ public class AuthController {
                           IdentityResolver identityResolver,
                           OnboardingClient onboarding,
                           SessionService sessionService,
+                          GatewayKeys gatewayKeys,
+                          CoreAdminClient coreAdmin,
                           @Value("${luke.auth.workos.ui-callback-url:http://localhost:5173/sso-callback}") String uiCallbackUrl,
                           @Value("${luke.auth.workos.cookie-secure:true}") boolean cookieSecure,
                           @Value("${luke.auth.workos.cookie-same-site:Lax}") String cookieSameSite) {
@@ -85,6 +94,8 @@ public class AuthController {
         this.identityResolver = identityResolver;
         this.onboarding = onboarding;
         this.sessionService = sessionService;
+        this.gatewayKeys = gatewayKeys;
+        this.coreAdmin = coreAdmin;
         this.uiCallbackUrl = uiCallbackUrl;
         this.cookieSecure = cookieSecure;
         this.cookieSameSite = cookieSameSite;
@@ -94,6 +105,8 @@ public class AuthController {
     public record LoginRequest(String email, String password) {}
     public record ProfileRequest(String firstName, String lastName) {}
     public record PasswordRequest(String currentPassword, String newPassword) {}
+    public record InviteRequest(String firstName, String lastName, String email) {}
+    public record AddMemberRequest(String email, String role, String accessLevel) {}
 
     // ── Register ────────────────────────────────────────────────────────────
 
@@ -265,15 +278,179 @@ public class AuthController {
 
     @DeleteMapping("/account")
     public ResponseEntity<?> deleteAccount(HttpServletRequest request, HttpServletResponse response) {
-        String userId = requireWorkosUserId(request);
-        if (userId == null) return error(HttpStatus.UNAUTHORIZED, "Unauthorized", "Missing or invalid token");
+        Jwt jwt = verifiedJwt(request);
+        if (jwt == null) return error(HttpStatus.UNAUTHORIZED, "Unauthorized", "Missing or invalid token");
+        String workosUserId = jwt.getSubject();
+        String engineUserId = identityResolver.toEngineUserId(workosUserId);
+
+        // 1. Cascade engine-side cleanup FIRST (it needs the identity to still exist).
+        //    If it fails, abort and leave the WorkOS user so the delete can be retried.
         try {
-            workos.deleteUser(userId);
+            CoreAdminClient.CoreResponse core = coreAdmin.deleteAccount(mintActAs(engineUserId));
+            if (core.status() / 100 != 2) {
+                return error(HttpStatus.BAD_GATEWAY, "Delete failed",
+                        "Could not clean up the engine account (status " + core.status() + ")");
+            }
+        } catch (CoreAdminClient.CoreException e) {
+            return error(HttpStatus.BAD_GATEWAY, "Delete failed", e.getMessage());
+        }
+
+        // 2. Now remove the WorkOS identity.
+        try {
+            workos.deleteUser(workosUserId);
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Delete failed", e.getMessage());
         }
         clearRefreshCookie(response);
         return ResponseEntity.ok(Map.of("ok", true));
+    }
+
+    // ── Org admin: invite teammates + add existing users to the org ──────────
+    //    Every call requires the caller to be a tenant-admin of X-Tenant-Id.
+
+    @PostMapping("/org/invitations")
+    public ResponseEntity<?> invite(@RequestBody InviteRequest req, HttpServletRequest request) {
+        AdminCaller caller = requireTenantAdmin(request);
+        if (caller.error != null) return caller.error;
+        if (isBlank(req.email())) return error(HttpStatus.BAD_REQUEST, "Bad Request", "email is required");
+        try {
+            Map<String, Object> inv = workos.sendInvitation(req.email().trim(), caller.workosUserId);
+            return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("ok", true, "invitation", invitationView(inv)));
+        } catch (WorkosClient.WorkosException e) {
+            return error(HttpStatus.valueOf(normalize(e.status())), "Invite failed", e.getMessage());
+        }
+    }
+
+    @GetMapping("/org/invitations")
+    public ResponseEntity<?> listInvitations(HttpServletRequest request) {
+        AdminCaller caller = requireTenantAdmin(request);
+        if (caller.error != null) return caller.error;
+        try {
+            Object data = workos.listInvitations(null).get("data");
+            List<Map<String, Object>> views = new ArrayList<>();
+            if (data instanceof List<?> list) {
+                for (Object o : list) {
+                    if (o instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> m = (Map<String, Object>) o;
+                        views.add(invitationView(m));
+                    }
+                }
+            }
+            return ResponseEntity.ok(Map.of("invitations", views));
+        } catch (WorkosClient.WorkosException e) {
+            return error(HttpStatus.valueOf(normalize(e.status())), "Could not list invitations", e.getMessage());
+        }
+    }
+
+    @PostMapping("/org/invitations/{id}/revoke")
+    public ResponseEntity<?> revokeInvitation(@PathVariable String id, HttpServletRequest request) {
+        AdminCaller caller = requireTenantAdmin(request);
+        if (caller.error != null) return caller.error;
+        try {
+            workos.revokeInvitation(id);
+            return ResponseEntity.ok(Map.of("ok", true));
+        } catch (WorkosClient.WorkosException e) {
+            return error(HttpStatus.valueOf(normalize(e.status())), "Revoke failed", e.getMessage());
+        }
+    }
+
+    @PostMapping("/org/members")
+    public ResponseEntity<?> addMember(@RequestBody AddMemberRequest req, HttpServletRequest request) {
+        AdminCaller caller = requireTenantAdmin(request);
+        if (caller.error != null) return caller.error;
+        if (isBlank(req.email())) return error(HttpStatus.BAD_REQUEST, "Bad Request", "email is required");
+
+        Map<String, Object> invitee;
+        try {
+            invitee = workos.findUserByEmail(req.email().trim());
+        } catch (WorkosClient.WorkosException e) {
+            return error(HttpStatus.valueOf(normalize(e.status())), "Lookup failed", e.getMessage());
+        }
+        if (invitee == null) {
+            return error(HttpStatus.NOT_FOUND, "Not Found",
+                    "No user with that email yet. Send them an invite first.");
+        }
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", identityResolver.toEngineUserId(str(invitee.get("id"))));
+        body.put("firstName", invitee.get("first_name"));
+        body.put("lastName", invitee.get("last_name"));
+        body.put("email", invitee.get("email"));
+        body.put("role", isBlank(req.role()) ? "tenant-user" : req.role());
+        body.put("accessLevel", req.accessLevel());
+
+        CoreAdminClient.CoreResponse core;
+        try {
+            core = coreAdmin.createOrgUser(mintActAs(caller.engineUserId), caller.tenant, body);
+        } catch (CoreAdminClient.CoreException e) {
+            return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", e.getMessage());
+        }
+        return ResponseEntity.status(core.status())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(core.body().length == 0 ? new byte[0] : core.body());
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+
+    /** A verified caller who is a tenant-admin of their active tenant, or an {@code error} to return. */
+    private record AdminCaller(String workosUserId, String engineUserId, String tenant, ResponseEntity<?> error) {}
+
+    private AdminCaller requireTenantAdmin(HttpServletRequest request) {
+        Jwt jwt = verifiedJwt(request);
+        if (jwt == null) {
+            return new AdminCaller(null, null, null,
+                    error(HttpStatus.UNAUTHORIZED, "Unauthorized", "Missing or invalid token"));
+        }
+        String tenant = request.getHeader("X-Tenant-Id");
+        if (isBlank(tenant)) {
+            return new AdminCaller(null, null, null,
+                    error(HttpStatus.BAD_REQUEST, "Bad Request", "X-Tenant-Id is required"));
+        }
+        String engineUserId = identityResolver.toEngineUserId(jwt.getSubject());
+        boolean admin;
+        try {
+            Map<String, Object> session = sessionService.session(engineUserId, tenant);
+            admin = Boolean.TRUE.equals(session.get("tenantAdmin"));
+        } catch (Exception e) {
+            admin = false;
+        }
+        if (!admin) {
+            return new AdminCaller(null, null, null,
+                    error(HttpStatus.FORBIDDEN, "Forbidden", "Requires org owner (tenant-admin)"));
+        }
+        return new AdminCaller(jwt.getSubject(), engineUserId, tenant, null);
+    }
+
+    /** Mint an act-as token, converting the checked signing exception into a CoreException. */
+    private String mintActAs(String engineUserId) {
+        try {
+            return gatewayKeys.mintActAsToken(engineUserId);
+        } catch (Exception e) {
+            throw new CoreAdminClient.CoreException("Could not mint act-as token: " + e.getMessage());
+        }
+    }
+
+    /** Verify the Bearer access token and return the {@link Jwt}, or null if missing/invalid. */
+    private Jwt verifiedJwt(HttpServletRequest request) {
+        String header = request.getHeader(HttpHeaders.AUTHORIZATION);
+        if (header == null || !header.regionMatches(true, 0, "Bearer ", 0, 7)) return null;
+        try {
+            return verifier.verify(header.substring(7).trim());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Map a WorkOS invitation object to the UI-facing shape. */
+    private static Map<String, Object> invitationView(Map<String, Object> inv) {
+        Map<String, Object> v = new LinkedHashMap<>();
+        if (inv == null) return v;
+        v.put("id", inv.get("id"));
+        v.put("email", inv.get("email"));
+        v.put("state", inv.get("state"));
+        v.put("expiresAt", inv.get("expires_at"));
+        return v;
     }
 
     // ────────────────────────────────────────────────────────────────────────

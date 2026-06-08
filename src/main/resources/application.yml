@@ -31,15 +31,40 @@ luke:
     service:
       keys: ${LUKE_AUTH_SERVICE_KEYS:}
 
-    # ── Clerk (authentication) ──────────────────────────────────────────────
-    # JWKS endpoint of your Clerk instance. For a dev instance it is
-    #   https://<frontend-api>.clerk.accounts.dev/.well-known/jwks.json
-    # The gateway verifies the token signature against these keys.
-    clerk:
-      jwks-url: ${CLERK_JWKS_URL:}
-      issuer: ${CLERK_ISSUER:}
-      # Optional: if set, the "azp"/"aud" claim must match one of these origins.
-      audience: ${CLERK_AUDIENCE:}
+    # ── WorkOS (authentication) ─────────────────────────────────────────────
+    # luke-auth runs the login flows server-to-server against the WorkOS User
+    # Management API and verifies the issued access tokens against WorkOS's JWKS.
+    workos:
+      # From the WorkOS dashboard → API Keys. The api-key is SECRET.
+      client-id: ${WORKOS_CLIENT_ID:}
+      api-key: ${WORKOS_API_KEY:}
+      api-base-url: ${WORKOS_API_BASE:https://api.workos.com}
+      # JWKS for verifying access tokens. Defaults to
+      #   <api-base-url>/sso/jwks/<client-id>  when left blank.
+      jwks-url: ${WORKOS_JWKS_URL:}
+      issuer: ${WORKOS_ISSUER:}
+      audience: ${WORKOS_AUDIENCE:}
+      # Where WorkOS sends the browser back after social/SSO login. Must be
+      # registered in the WorkOS dashboard's redirect URIs.
+      redirect-uri: ${WORKOS_REDIRECT_URI:http://localhost:8083/auth/callback}
+      # After /auth/callback succeeds, the browser is redirected here with the
+      # access token in the URL fragment (the consumer UI's SSO callback page).
+      ui-callback-url: ${WORKOS_UI_CALLBACK_URL:http://localhost:5173/sso-callback}
+      # Refresh-token cookie attributes. Set cookie-secure=false for local http;
+      # use SameSite=None (+ Secure) only if the UI is on a cross-site domain.
+      cookie-secure: ${WORKOS_COOKIE_SECURE:true}
+      cookie-same-site: ${WORKOS_COOKIE_SAMESITE:Lax}
+
+    # ── Self-service provisioning (optional) ────────────────────────────────
+    # If set, /auth/register provisions the new user into core-engine via the
+    # operator-only /api/admin/onboard-user. Leave default-tenant blank to skip
+    # (e.g. when users create their own org after first login).
+    onboarding:
+      operator-user: ${ONBOARDING_OPERATOR_USER:}
+      operator-password: ${ONBOARDING_OPERATOR_PASSWORD:}
+      default-tenant: ${ONBOARDING_DEFAULT_TENANT:}
+      default-role: ${ONBOARDING_DEFAULT_ROLE:}
+      default-access-level: ${ONBOARDING_DEFAULT_ACCESS_LEVEL:READ_WRITE}
 
     # ── Gateway signing key (the "secret badge") ────────────────────────────
     # PEM-encoded PKCS#8 RSA private key used to sign act-as-user tokens.

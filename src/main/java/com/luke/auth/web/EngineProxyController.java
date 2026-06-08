@@ -1,7 +1,7 @@
 package com.luke.auth.web;
 
-import com.luke.auth.config.ClerkTokenVerifier;
 import com.luke.auth.config.GatewayKeys;
+import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
 import jakarta.servlet.http.HttpServletRequest;
 import java.net.URI;
@@ -30,8 +30,8 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>For each request it:
  * <ol>
- *   <li>verifies the caller's Clerk JWT (the wristband),</li>
- *   <li>resolves the Clerk {@code sub} to an engine userId,</li>
+ *   <li>verifies the caller's WorkOS access token (the wristband),</li>
+ *   <li>resolves the WorkOS {@code sub} to an engine userId,</li>
  *   <li>mints a short-lived act-as-user token (the secret badge), and</li>
  *   <li>forwards method + path + query + body + {@code X-Tenant-Id} unchanged,
  *       swapping only the {@code Authorization} header to the minted token.</li>
@@ -39,7 +39,7 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>It is deliberately resource-agnostic: a single wildcard mapping forwards
  * the entire engine API (current and future) opaquely. The powerful act-as-user
- * token never leaves this server — the browser only ever holds its Clerk token.
+ * token never leaves this server — the browser only ever holds its WorkOS token.
  */
 @RestController
 public class EngineProxyController {
@@ -52,7 +52,7 @@ public class EngineProxyController {
     private static final Set<String> SKIP_RESPONSE_HEADERS = Set.of(
             "transfer-encoding", "content-length", "connection");
 
-    private final ClerkTokenVerifier clerkVerifier;
+    private final WorkosTokenVerifier workosVerifier;
     private final IdentityResolver identityResolver;
     private final GatewayKeys gatewayKeys;
     private final String coreEngineBaseUrl;
@@ -60,12 +60,12 @@ public class EngineProxyController {
 
     private final boolean devMode;
 
-    public EngineProxyController(ClerkTokenVerifier clerkVerifier,
+    public EngineProxyController(WorkosTokenVerifier workosVerifier,
                                  IdentityResolver identityResolver,
                                  GatewayKeys gatewayKeys,
                                  @Value("${luke.auth.core-engine.base-url}") String coreEngineBaseUrl,
                                  @Value("${luke.auth.dev-mode:false}") boolean devMode) {
-        this.clerkVerifier = clerkVerifier;
+        this.workosVerifier = workosVerifier;
         this.identityResolver = identityResolver;
         this.gatewayKeys = gatewayKeys;
         this.devMode = devMode;
@@ -85,18 +85,18 @@ public class EngineProxyController {
             return ResponseEntity.ok().build();
         }
 
-        // ── 1. Authenticate: verify the Clerk wristband ───────────────────────
+        // ── 1. Authenticate: verify the WorkOS wristband ──────────────────────
         String engineUserId = null;
-        String clerkToken = bearerToken(request);
-        if (clerkToken != null) {
+        String workosToken = bearerToken(request);
+        if (workosToken != null) {
             try {
-                engineUserId = identityResolver.toEngineUserId(clerkVerifier.verify(clerkToken).getSubject());
+                engineUserId = identityResolver.toEngineUserId(workosVerifier.verify(workosToken).getSubject());
             } catch (JwtException | IllegalArgumentException e) {
                 log.debug("Rejected request: {}", e.getMessage());
             }
         }
         // Dev-mode fallback (local only): an X-Dev-User header stands in for a
-        // verified Clerk token, mirroring /session. Never enable in prod.
+        // verified WorkOS token, mirroring /session. Never enable in prod.
         if (engineUserId == null && devMode) {
             String dev = request.getHeader("X-Dev-User");
             if (dev != null && !dev.isBlank()) {
@@ -104,7 +104,7 @@ public class EngineProxyController {
             }
         }
         if (engineUserId == null) {
-            return unauthorized(clerkToken == null ? "Missing Bearer token" : "Invalid or expired token");
+            return unauthorized(workosToken == null ? "Missing Bearer token" : "Invalid or expired token");
         }
 
         // ── 2. Mint the act-as-user badge ─────────────────────────────────────

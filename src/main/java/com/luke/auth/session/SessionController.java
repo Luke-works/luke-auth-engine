@@ -1,6 +1,6 @@
 package com.luke.auth.session;
 
-import com.luke.auth.config.ClerkTokenVerifier;
+import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
@@ -15,8 +15,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * {@code GET /session} — the per-login (and per-tenant-switch) endpoint the UI
- * calls to learn who the user is and what they can do. Verifies the Clerk
- * wristband, then hands off to {@link SessionService} to derive + combine.
+ * calls to learn who the user is and what they can do. Verifies the WorkOS
+ * access token, then hands off to {@link SessionService} to derive + combine.
  *
  * <p>A specific mapping, so it is served here rather than forwarded by the
  * gateway's {@code /**} proxy.
@@ -27,16 +27,16 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class SessionController {
 
-    private final ClerkTokenVerifier clerkVerifier;
+    private final WorkosTokenVerifier workosVerifier;
     private final IdentityResolver identityResolver;
     private final SessionService sessionService;
     private final boolean devMode;
 
-    public SessionController(ClerkTokenVerifier clerkVerifier,
+    public SessionController(WorkosTokenVerifier workosVerifier,
                              IdentityResolver identityResolver,
                              SessionService sessionService,
                              @Value("${luke.auth.dev-mode:false}") boolean devMode) {
-        this.clerkVerifier = clerkVerifier;
+        this.workosVerifier = workosVerifier;
         this.identityResolver = identityResolver;
         this.sessionService = sessionService;
         this.devMode = devMode;
@@ -66,13 +66,13 @@ public class SessionController {
         }
     }
 
-    /** Clerk Bearer → engine userId; or, in dev mode only, an X-Dev-User header. */
+    /** WorkOS Bearer → engine userId; or, in dev mode only, an X-Dev-User header. */
     private String authenticate(HttpServletRequest request) {
         String header = request.getHeader(HttpHeaders.AUTHORIZATION);
         if (header != null && header.regionMatches(true, 0, "Bearer ", 0, 7)) {
             String token = header.substring(7).trim();
-            Jwt clerk = clerkVerifier.verify(token);
-            return identityResolver.toEngineUserId(clerk.getSubject());
+            Jwt workos = workosVerifier.verify(token);
+            return identityResolver.toEngineUserId(workos.getSubject());
         }
         if (devMode) {
             String devUser = request.getHeader("X-Dev-User");

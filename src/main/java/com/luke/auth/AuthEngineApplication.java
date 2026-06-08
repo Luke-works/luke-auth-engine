@@ -8,8 +8,9 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  *
  * <p>It sits between {@code luke-consumer-ui} and {@code luke-core-engine}:
  * <ol>
- *   <li>verifies the caller's Clerk JWT (authentication),</li>
- *   <li>resolves the Clerk identity to an engine userId,</li>
+ *   <li>runs the login flows against WorkOS ({@code /auth/*}) and verifies the
+ *       caller's WorkOS access token (authentication),</li>
+ *   <li>resolves the WorkOS identity to an engine userId,</li>
  *   <li>mints a short-lived, signed "act-as-user" token, and</li>
  *   <li>transparently proxies the request to the engine, which performs
  *       authorization against that user's groups/tenants.</li>

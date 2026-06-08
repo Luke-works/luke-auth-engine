@@ -24,7 +24,7 @@
     <packaging>jar</packaging>
 
     <name>Luke Auth Engine</name>
-    <description>Consumer auth gateway: verifies Clerk JWTs and proxies to luke-core-engine, vouching for users with a signed act-as-user token.</description>
+    <description>Consumer auth gateway: runs WorkOS login flows, verifies WorkOS access tokens, and proxies to luke-core-engine, vouching for users with a signed act-as-user token.</description>
 
     <properties>
         <java.version>21</java.version>

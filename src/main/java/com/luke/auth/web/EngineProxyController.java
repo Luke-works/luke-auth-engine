@@ -94,30 +94,39 @@ public class EngineProxyController {
             return ResponseEntity.ok().build();
         }
 
-        // ── 1. Authenticate: verify the WorkOS wristband ──────────────────────
-        String engineUserId = null;
-        String workosToken = bearerToken(request);
-        if (workosToken != null) {
-            try {
-                engineUserId = identityResolver.toEngineUserId(workosVerifier.verify(workosToken).getSubject());
-            } catch (JwtException | IllegalArgumentException e) {
-                log.debug("Rejected request: {}", e.getMessage());
-            }
-        }
-        // Dev-mode fallback (local only): an X-Dev-User header stands in for a
-        // verified WorkOS token, mirroring /session. Never enable in prod.
-        if (engineUserId == null && devMode) {
-            String dev = request.getHeader("X-Dev-User");
-            if (dev != null && !dev.isBlank()) {
-                engineUserId = dev.trim();
-            }
-        }
-        if (engineUserId == null) {
-            return unauthorized(workosToken == null ? "Missing Bearer token" : "Invalid or expired token");
-        }
+        // The ONLY unauthenticated surface: the public embed endpoints. A signed
+        // embed token (validated downstream) is the auth, so we forward these
+        // WITHOUT verifying a WorkOS token and WITHOUT minting an act-as badge.
+        // Scoped to exactly this prefix — nothing else may be public.
+        boolean isPublic = request.getRequestURI().startsWith("/api/public/");
 
-        // ── 2. Mint the act-as-user badge ─────────────────────────────────────
-        String actAsToken = gatewayKeys.mintActAsToken(engineUserId);
+        String actAsToken = null;
+        if (!isPublic) {
+            // ── 1. Authenticate: verify the WorkOS wristband ──────────────────
+            String engineUserId = null;
+            String workosToken = bearerToken(request);
+            if (workosToken != null) {
+                try {
+                    engineUserId = identityResolver.toEngineUserId(workosVerifier.verify(workosToken).getSubject());
+                } catch (JwtException | IllegalArgumentException e) {
+                    log.debug("Rejected request: {}", e.getMessage());
+                }
+            }
+            // Dev-mode fallback (local only): an X-Dev-User header stands in for a
+            // verified WorkOS token, mirroring /session. Never enable in prod.
+            if (engineUserId == null && devMode) {
+                String dev = request.getHeader("X-Dev-User");
+                if (dev != null && !dev.isBlank()) {
+                    engineUserId = dev.trim();
+                }
+            }
+            if (engineUserId == null) {
+                return unauthorized(workosToken == null ? "Missing Bearer token" : "Invalid or expired token");
+            }
+
+            // ── 2. Mint the act-as-user badge ─────────────────────────────────
+            actAsToken = gatewayKeys.mintActAsToken(engineUserId);
+        }
 
         // ── 3. Forward to the engine, swapping only Authorization ─────────────
         URI target = buildTargetUri(request);
@@ -131,7 +140,7 @@ public class EngineProxyController {
                                 : HttpRequest.BodyPublishers.ofByteArray(body));
 
         copyRequestHeaders(request, forward);
-        forward.header(HttpHeaders.AUTHORIZATION, "Bearer " + actAsToken);
+        if (actAsToken != null) forward.header(HttpHeaders.AUTHORIZATION, "Bearer " + actAsToken);
 
         HttpResponse<byte[]> upstream;
         try {

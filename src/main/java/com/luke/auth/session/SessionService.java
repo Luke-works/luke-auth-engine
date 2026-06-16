@@ -39,11 +39,23 @@ public class SessionService {
      * (nullable → resolve a default). Cached per (user, tenant) for the TTL.
      */
     public Map<String, Object> session(String engineUserId, String requestedTenant) throws Exception {
+        return session(engineUserId, requestedTenant, false);
+    }
+
+    /**
+     * As {@link #session(String, String)}, but {@code bypassCache} skips the cached
+     * entry and recomputes from the systems of record (then refreshes the cache). The
+     * UI uses it right after it changes access, so new roles/capabilities reflect
+     * immediately instead of after the TTL.
+     */
+    public Map<String, Object> session(String engineUserId, String requestedTenant, boolean bypassCache) throws Exception {
         String cacheKey = engineUserId + "|" + (requestedTenant == null ? "" : requestedTenant);
-        Cached hit = cache.get(cacheKey);
         long now = System.currentTimeMillis();
-        if (hit != null && hit.expiresAt > now) {
-            return hit.body;
+        if (!bypassCache) {
+            Cached hit = cache.get(cacheKey);
+            if (hit != null && hit.expiresAt > now) {
+                return hit.body;
+            }
         }
 
         // 1. Camunda view — called as the user via a minted act-as token.

@@ -43,7 +43,8 @@ public class SessionController {
     }
 
     @GetMapping("/session")
-    public ResponseEntity<?> session(HttpServletRequest request) {
+    public ResponseEntity<?> session(HttpServletRequest request,
+                                     @org.springframework.web.bind.annotation.RequestParam(value = "fresh", defaultValue = "false") boolean fresh) {
         String engineUserId;
         try {
             engineUserId = authenticate(request);
@@ -56,7 +57,9 @@ public class SessionController {
 
         String tenant = request.getHeader("X-Tenant-Id");
         try {
-            return ResponseEntity.ok(sessionService.session(engineUserId, tenant));
+            // fresh=true bypasses the per-(user,tenant) cache — the UI sets it right
+            // after changing access so the change reflects without waiting out the TTL.
+            return ResponseEntity.ok(sessionService.session(engineUserId, tenant, fresh));
         } catch (SessionService.TenantForbiddenException e) {
             return error(HttpStatus.FORBIDDEN, "Forbidden", e.getMessage());
         } catch (PermissionsClient.UpstreamException e) {

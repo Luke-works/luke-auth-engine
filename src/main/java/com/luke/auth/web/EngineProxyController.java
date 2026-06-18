@@ -5,10 +5,14 @@ import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
 import jakarta.servlet.http.HttpServletRequest;
 import java.net.URI;
+import java.net.URLDecoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -50,7 +54,11 @@ public class EngineProxyController {
      *  accept-encoding is dropped so the engine never gzips (no encoding edge cases). */
     private static final Set<String> SKIP_REQUEST_HEADERS = Set.of(
             "host", "authorization", "content-length", "connection", "transfer-encoding",
-            "expect", "accept-encoding");
+            "expect", "accept-encoding",
+            // Identity / trust headers the downstream engines honor. The gateway is the
+            // SOLE asserter of identity (via the minted act-as token), so a client must
+            // never be able to inject these to impersonate a user or a trusted service.
+            "x-user-id", "x-dev-user", "x-internal-key");
 
     /** ONLY these upstream response headers are relayed. The engine sits behind its own
      *  Render/Cloudflare edge, so its responses carry infra headers (server, alt-svc,
@@ -94,11 +102,21 @@ public class EngineProxyController {
             return ResponseEntity.ok().build();
         }
 
+        // Canonicalize the path first: decode percent-escapes and resolve/refuse
+        // any "." or ".." segments. The public/protected decision must match what
+        // the engine ultimately resolves — otherwise a raw path like
+        // /api/public/../me (or its encoded form /api/public/%2e%2e/me) would be
+        // treated as public here yet hit a protected endpoint downstream.
+        String canonicalPath = canonicalPath(request.getRequestURI());
+        if (canonicalPath == null) {
+            return badRequest("Malformed or traversing request path");
+        }
+
         // The ONLY unauthenticated surface: the public embed endpoints. A signed
         // embed token (validated downstream) is the auth, so we forward these
         // WITHOUT verifying a WorkOS token and WITHOUT minting an act-as badge.
         // Scoped to exactly this prefix — nothing else may be public.
-        boolean isPublic = request.getRequestURI().startsWith("/api/public/");
+        boolean isPublic = canonicalPath.startsWith("/api/public/");
 
         String actAsToken = null;
         if (!isPublic) {
@@ -208,6 +226,42 @@ public class EngineProxyController {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(json.getBytes());
+    }
+
+    private ResponseEntity<byte[]> badRequest(String message) {
+        String json = "{\"error\":\"Bad Request\",\"message\":\"" + message + "\"}";
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(json.getBytes());
+    }
+
+    /**
+     * Decode percent-escapes and resolve path segments to a canonical absolute
+     * path. Returns {@code null} if the path is malformed or contains any
+     * traversal ({@code ..}) segment — including encoded forms like {@code %2e%2e}
+     * — so the caller can reject it before the public/protected decision.
+     */
+    private static String canonicalPath(String rawUri) {
+        if (rawUri == null) {
+            return null;
+        }
+        String decoded;
+        try {
+            decoded = URLDecoder.decode(rawUri, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        Deque<String> segments = new ArrayDeque<>();
+        for (String segment : decoded.split("/", -1)) {
+            if (segment.isEmpty() || segment.equals(".")) {
+                continue; // collapse empty ("//") and current-dir segments
+            }
+            if (segment.equals("..")) {
+                return null; // refuse traversal outright
+            }
+            segments.addLast(segment);
+        }
+        return "/" + String.join("/", segments);
     }
 
     private static String stripTrailingSlash(String url) {

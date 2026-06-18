@@ -44,6 +44,10 @@ luke:
       jwks-url: ${WORKOS_JWKS_URL:}
       issuer: ${WORKOS_ISSUER:}
       audience: ${WORKOS_AUDIENCE:}
+      # PROD: set true (with issuer + audience above) to REQUIRE issuer/audience
+      # validation — missing either then fails closed (rejects all tokens) instead
+      # of accepting expiry-only. Left false by default so issuer-less envs keep working.
+      strict-validation: ${WORKOS_STRICT_VALIDATION:false}
       # Where WorkOS sends the browser back after social/SSO login. Must be
       # registered in the WorkOS dashboard's redirect URIs.
       redirect-uri: ${WORKOS_REDIRECT_URI:http://localhost:8083/auth/callback}

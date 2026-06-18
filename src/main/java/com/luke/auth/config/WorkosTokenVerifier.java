@@ -5,11 +5,14 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtException;
 import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestOperations;
+import org.springframework.web.client.RestTemplate;
 import org.springframework.util.StringUtils;
 
 /**
@@ -49,6 +52,11 @@ public class WorkosTokenVerifier {
     @Value("${luke.auth.workos.audience:}")
     private String audience;
 
+    /** When true, missing issuer/audience is FATAL (fail closed) rather than warn-and-continue.
+     *  Defaults false so issuer-less environments keep working; prod should enable it. */
+    @Value("${luke.auth.workos.strict-validation:false}")
+    private boolean strictValidation;
+
     private NimbusJwtDecoder decoder;
 
     @PostConstruct
@@ -63,16 +71,39 @@ public class WorkosTokenVerifier {
             return;
         }
 
-        NimbusJwtDecoder d = NimbusJwtDecoder.withJwkSetUri(url).build();
+        // Bound the JWKS fetch so a slow/unreachable JWKS endpoint can't hang request threads.
+        NimbusJwtDecoder d = NimbusJwtDecoder.withJwkSetUri(url).restOperations(jwksRestOperations()).build();
 
-        // Default validators give us expiry; add issuer if configured.
+        // Default validators give us expiry; add issuer if configured. Under strict
+        // validation, a missing issuer/audience is fatal: we leave the decoder unset so
+        // verify() rejects every token (fail closed) instead of accepting expiry-only.
         if (StringUtils.hasText(issuer)) {
             d.setJwtValidator(JwtValidators.createDefaultWithIssuer(issuer));
+        } else if (strictValidation) {
+            log.error("WorkosTokenVerifier: strict-validation is on but WORKOS_ISSUER is unset — refusing all "
+                    + "tokens (fail closed). Set luke.auth.workos.issuer.");
+            return;
         } else {
-            log.warn("WorkosTokenVerifier: no WORKOS_ISSUER set — issuer claim will not be checked.");
+            log.warn("WorkosTokenVerifier: no WORKOS_ISSUER set — issuer claim will not be checked "
+                    + "(set luke.auth.workos.strict-validation=true to require it in production).");
         }
+
+        if (strictValidation && !StringUtils.hasText(audience)) {
+            log.error("WorkosTokenVerifier: strict-validation is on but WORKOS_AUDIENCE is unset — refusing all "
+                    + "tokens (fail closed). Set luke.auth.workos.audience.");
+            return;
+        }
+
         this.decoder = d;
-        log.info("WorkosTokenVerifier: verifying WorkOS access tokens via JWKS {}", url);
+        log.info("WorkosTokenVerifier: verifying WorkOS access tokens via JWKS {} (strict={})", url, strictValidation);
+    }
+
+    /** A RestTemplate with explicit connect/read timeouts for the JWKS fetch. */
+    private static RestOperations jwksRestOperations() {
+        SimpleClientHttpRequestFactory rf = new SimpleClientHttpRequestFactory();
+        rf.setConnectTimeout(5_000);
+        rf.setReadTimeout(5_000);
+        return new RestTemplate(rf);
     }
 
     /**
@@ -86,13 +117,18 @@ public class WorkosTokenVerifier {
             throw new JwtException("WorkOS verifier not configured (WORKOS_CLIENT_ID / WORKOS_JWKS_URL missing)");
         }
         Jwt jwt = decoder.decode(rawToken);
-        if (StringUtils.hasText(audience)) {
-            List<String> aud = jwt.getAudience();
-            if (aud == null || !aud.contains(audience)) {
-                throw new JwtException("WorkOS token audience mismatch");
-            }
+        if (!audienceAllowed(jwt.getAudience(), audience)) {
+            throw new JwtException("WorkOS token audience mismatch");
         }
         return jwt;
+    }
+
+    /** True if no audience is required, or the token carries the expected audience. */
+    static boolean audienceAllowed(List<String> tokenAudience, String expected) {
+        if (!StringUtils.hasText(expected)) {
+            return true;
+        }
+        return tokenAudience != null && tokenAudience.contains(expected);
     }
 
     private static String strip(String url) {

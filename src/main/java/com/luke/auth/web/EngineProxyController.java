@@ -241,7 +241,8 @@ public class EngineProxyController {
      * traversal ({@code ..}) segment — including encoded forms like {@code %2e%2e}
      * — so the caller can reject it before the public/protected decision.
      */
-    private static String canonicalPath(String rawUri) {
+    // Package-private (not private) so it can be unit-tested directly.
+    static String canonicalPath(String rawUri) {
         if (rawUri == null) {
             return null;
         }

@@ -3,6 +3,8 @@ package com.luke.auth.web;
 import com.luke.auth.config.GatewayKeys;
 import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
+import com.luke.auth.session.PermissionsClient;
+import com.luke.auth.session.SessionService;
 import jakarta.servlet.http.HttpServletRequest;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -72,6 +74,7 @@ public class EngineProxyController {
     private final WorkosTokenVerifier workosVerifier;
     private final IdentityResolver identityResolver;
     private final GatewayKeys gatewayKeys;
+    private final SessionService sessionService;
     private final String coreEngineBaseUrl;
     private final HttpClient httpClient;
 
@@ -80,11 +83,13 @@ public class EngineProxyController {
     public EngineProxyController(WorkosTokenVerifier workosVerifier,
                                  IdentityResolver identityResolver,
                                  GatewayKeys gatewayKeys,
+                                 SessionService sessionService,
                                  @Value("${luke.auth.core-engine.base-url}") String coreEngineBaseUrl,
                                  @Value("${luke.auth.dev-mode:false}") boolean devMode) {
         this.workosVerifier = workosVerifier;
         this.identityResolver = identityResolver;
         this.gatewayKeys = gatewayKeys;
+        this.sessionService = sessionService;
         this.devMode = devMode;
         this.coreEngineBaseUrl = stripTrailingSlash(coreEngineBaseUrl);
         this.httpClient = HttpClient.newBuilder()
@@ -142,11 +147,34 @@ public class EngineProxyController {
                 return unauthorized(workosToken == null ? "Missing Bearer token" : "Invalid or expired token");
             }
 
-            // ── 2. Mint the act-as-user badge ─────────────────────────────────
+            // ── 2. Assert tenant scope at the trust boundary ──────────────────
+            // The gateway injects identity, so it must also vouch for the tenant the
+            // caller claims. If the request carries X-Tenant-Id, verify the user is a
+            // member (operators may use any tenant) BEFORE minting/forwarding — we do
+            // not relay a client tenant header the user can't actually use.
+            String requestedTenant = request.getHeader("X-Tenant-Id");
+            if (requestedTenant != null && !requestedTenant.isBlank()) {
+                try {
+                    Map<String, Object> sess = sessionService.session(engineUserId, requestedTenant.trim());
+                    if (!requestedTenant.trim().equals(sess.get("tenant"))) {
+                        return forbidden("Not a member of tenant '" + requestedTenant.trim() + "'");
+                    }
+                } catch (SessionService.TenantForbiddenException e) {
+                    return forbidden(e.getMessage());
+                } catch (PermissionsClient.UpstreamException e) {
+                    log.warn("Tenant membership check failed (upstream) for {} / {}: {}",
+                            engineUserId, requestedTenant, e.getMessage());
+                    return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body("{\"error\":\"Bad Gateway\",\"message\":\"Could not verify tenant access\"}".getBytes());
+                }
+            }
+
+            // ── 3. Mint the act-as-user badge ─────────────────────────────────
             actAsToken = gatewayKeys.mintActAsToken(engineUserId);
         }
 
-        // ── 3. Forward to the engine, swapping only Authorization ─────────────
+        // ── 4. Forward to the engine, swapping only Authorization ─────────────
         URI target = buildTargetUri(request);
         byte[] body = request.getInputStream().readAllBytes();
 
@@ -170,7 +198,7 @@ public class EngineProxyController {
                     .body("{\"error\":\"Bad Gateway\",\"message\":\"Engine unreachable\"}".getBytes());
         }
 
-        // ── 4. Relay the engine's response back to the consumer ───────────────
+        // ── 5. Relay the engine's response back to the consumer ───────────────
         return relay(upstream);
     }
 
@@ -224,6 +252,13 @@ public class EngineProxyController {
     private ResponseEntity<byte[]> unauthorized(String message) {
         String json = "{\"error\":\"Unauthorized\",\"message\":\"" + message + "\"}";
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(json.getBytes());
+    }
+
+    private ResponseEntity<byte[]> forbidden(String message) {
+        String json = "{\"error\":\"Forbidden\",\"message\":\"" + message + "\"}";
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(json.getBytes());
     }

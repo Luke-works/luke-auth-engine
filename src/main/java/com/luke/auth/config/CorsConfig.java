@@ -29,7 +29,12 @@ public class CorsConfig {
         CorsConfiguration config = new CorsConfiguration();
         config.setAllowedOriginPatterns(origins);
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
-        config.setAllowedHeaders(List.of("*"));
+        // Explicit allowlist rather than "*": with allowCredentials(true) a wildcard
+        // header policy needlessly widens what a malicious origin could probe. Only
+        // the headers the consumer UI actually sends are permitted. (Identity/trust
+        // headers like X-User-Id are intentionally NOT allowed — the gateway asserts
+        // identity via the act-as token, and the proxy strips them anyway.)
+        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept", "X-Tenant-Id"));
         config.setAllowCredentials(true);
         config.setMaxAge(3600L);
 

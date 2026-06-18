@@ -4,6 +4,7 @@ import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jose.jwk.JWK;
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jwt.JWTClaimsSet;
@@ -16,8 +17,10 @@ import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,6 +49,16 @@ public class GatewayKeys {
     @Value("${luke.auth.gateway.private-key:}")
     private String privateKeyPem;
 
+    /** PEM X.509 public key of the PREVIOUS signing key, published alongside the
+     *  current one during a rotation overlap (nullable). */
+    @Value("${luke.auth.gateway.previous-public-key:}")
+    private String previousPublicKeyPem;
+
+    /** When true, a stable {@code private-key} is mandatory — boot fails without it
+     *  (no ephemeral fallback). Default false so non-prod can run ephemeral. */
+    @Value("${luke.auth.gateway.require-stable-key:false}")
+    private boolean requireStableKey;
+
     @Value("${luke.auth.gateway.issuer}")
     private String issuer;
 
@@ -58,9 +71,18 @@ public class GatewayKeys {
     private RSAKey rsaJwk;       // private + public, tagged with a thumbprint kid
     private RSASSASigner signer;
     private String keyId;        // RFC 7638 thumbprint of the public key
+    private RSAKey previousPublicJwk; // nullable — published during a rotation overlap
 
     @PostConstruct
     void init() throws Exception {
+        // A hardened deployment must not run on an ephemeral key: it rotates every
+        // restart and breaks act-as token verification until the engine refetches JWKS.
+        if (requireStableKey && !StringUtils.hasText(privateKeyPem)) {
+            throw new IllegalStateException(
+                    "luke.auth.gateway.require-stable-key=true but GATEWAY_PRIVATE_KEY is unset. A stable RSA "
+                    + "signing key is required (an ephemeral key rotates on every restart). Provide a PKCS#8 PEM.");
+        }
+
         KeyPair keyPair = StringUtils.hasText(privateKeyPem)
                 ? loadFromPem(privateKeyPem)
                 : generateEphemeral();
@@ -75,12 +97,20 @@ public class GatewayKeys {
         this.rsaJwk = new RSAKey.Builder(untagged).keyID(keyId).build();
         this.signer = new RSASSASigner(keyPair.getPrivate());
 
+        // Optional previous public key, published in the JWKS during a rotation so
+        // tokens still in flight signed by the old kid keep verifying.
+        if (StringUtils.hasText(previousPublicKeyPem)) {
+            this.previousPublicJwk = loadPublicJwkFromPem(previousPublicKeyPem);
+            log.info("GatewayKeys: publishing PREVIOUS public key in JWKS for rotation overlap (kid={})",
+                    previousPublicJwk.getKeyID());
+        }
+
         if (StringUtils.hasText(privateKeyPem)) {
             log.info("GatewayKeys: loaded RSA signing key from configuration (kid={})", keyId);
         } else {
             log.warn("GatewayKeys: no GATEWAY_PRIVATE_KEY set — generated an EPHEMERAL key (kid={}). "
                     + "Fine for non-prod (engine refetches JWKS on the new kid after a restart); "
-                    + "set GATEWAY_PRIVATE_KEY for a stable production key.", keyId);
+                    + "set GATEWAY_PRIVATE_KEY (and require-stable-key=true) for production.", keyId);
         }
     }
 
@@ -106,9 +136,31 @@ public class GatewayKeys {
         return jwt.serialize();
     }
 
-    /** Public half of the keypair as a JWK Set JSON document (served at /.well-known/jwks.json). */
+    /** Public half of the keypair(s) as a JWK Set JSON document (served at
+     *  /.well-known/jwks.json). Includes the previous public key during a rotation
+     *  so the engine can verify tokens signed by either kid. */
     public Map<String, Object> publicJwkSetJson() {
-        return new JWKSet(rsaJwk.toPublicJWK()).toJSONObject();
+        List<JWK> keys = new ArrayList<>();
+        keys.add(rsaJwk.toPublicJWK());
+        if (previousPublicJwk != null) {
+            keys.add(previousPublicJwk); // already public-only
+        }
+        return new JWKSet(keys).toJSONObject();
+    }
+
+    /** Load an X.509 (SubjectPublicKeyInfo) PEM public key into a public-only RSAKey,
+     *  tagged with its RFC 7638 thumbprint kid. */
+    private RSAKey loadPublicJwkFromPem(String pem) throws Exception {
+        String base64 = pem
+                .replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s", "");
+        byte[] der = Base64.getDecoder().decode(base64);
+        KeyFactory factory = KeyFactory.getInstance("RSA");
+        RSAPublicKey pub = (RSAPublicKey) factory.generatePublic(
+                new java.security.spec.X509EncodedKeySpec(der));
+        RSAKey untagged = new RSAKey.Builder(pub).build();
+        return new RSAKey.Builder(untagged).keyID(untagged.computeThumbprint().toString()).build();
     }
 
     private KeyPair generateEphemeral() throws Exception {

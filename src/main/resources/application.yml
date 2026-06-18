@@ -88,6 +88,14 @@ luke:
       # startup and the kid is derived from its thumbprint (engine refetches
       # JWKS automatically after a restart). Set this for a stable prod key.
       private-key: ${GATEWAY_PRIVATE_KEY:}
+      # PROD: set true to REQUIRE a stable GATEWAY_PRIVATE_KEY — boot fails if it's
+      # unset (no ephemeral fallback). Left false so dev/qa can run ephemeral.
+      require-stable-key: ${GATEWAY_REQUIRE_STABLE_KEY:false}
+      # ROTATION: PEM X.509 public key of the PREVIOUS signing key. When set, it's
+      # published in the JWKS alongside the current key so tokens signed by either
+      # kid verify during the overlap window — enabling zero-downtime key rotation.
+      # See docs/key-rotation.md. Retire (unset) once all old tokens have expired.
+      previous-public-key: ${GATEWAY_PREVIOUS_PUBLIC_KEY:}
       issuer: ${GATEWAY_ISSUER:luke-auth-engine}
       audience: ${GATEWAY_AUDIENCE:luke-core-engine}
       # How long an act-as-user token is valid. Short, since it is minted

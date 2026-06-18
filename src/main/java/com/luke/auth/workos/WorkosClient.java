@@ -53,7 +53,16 @@ public class WorkosClient {
                         @Value("${luke.auth.workos.client-id:}") String clientId,
                         @Value("${luke.auth.workos.api-key:}") String apiKey,
                         @Value("${luke.auth.workos.redirect-uri:http://localhost:8083/auth/callback}") String redirectUri,
-                        @Value("${luke.auth.workos.mark-email-verified-on-register:true}") boolean markEmailVerified) {
+                        @Value("${luke.auth.workos.mark-email-verified-on-register:false}") boolean markEmailVerified,
+                        @Value("${luke.auth.dev-mode:false}") boolean devMode) {
+        // Auto-verifying email at signup defeats email-ownership proof (anyone could
+        // register under an address they don't control). It's a dev-only shortcut, so
+        // refuse to boot if it's enabled without dev-mode — it must never reach prod.
+        if (markEmailVerified && !devMode) {
+            throw new IllegalStateException(
+                    "luke.auth.workos.mark-email-verified-on-register=true is a dev-only shortcut and "
+                    + "must not be enabled in production (set luke.auth.dev-mode=true to use it locally).");
+        }
         this.apiBase = strip(apiBase);
         this.clientId = clientId;
         this.apiKey = apiKey;
@@ -70,11 +79,9 @@ public class WorkosClient {
         if (password != null && !password.isBlank()) body.put("password", password);
         if (firstName != null && !firstName.isBlank()) body.put("first_name", firstName);
         if (lastName != null && !lastName.isBlank()) body.put("last_name", lastName);
-        // TEST-ONLY until a real /auth/verify flow exists: WorkOS requires the email
-        // to be verified before password authentication, but disabling the verification
-        // *email* in the dashboard does not lift that requirement — so for a headless
-        // sign-up we mark the user verified at creation. Flip mark-email-verified-on-register
-        // to false once email verification is implemented.
+        // Only when the dev-only shortcut is on (guarded in the constructor) do we
+        // pre-verify. With it off — the prod default — email_verified is left unset so
+        // WorkOS runs its own email verification and gates password auth on ownership.
         if (markEmailVerified) body.put("email_verified", true);
         return postJson(USERS_PATH, body, /*bearer=*/true);
     }

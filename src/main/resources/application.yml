@@ -54,10 +54,12 @@ luke:
       # use SameSite=None (+ Secure) only if the UI is on a cross-site domain.
       cookie-secure: ${WORKOS_COOKIE_SECURE:true}
       cookie-same-site: ${WORKOS_COOKIE_SAMESITE:Lax}
-      # TEST-ONLY: create users already email-verified so password login isn't blocked
-      # (WorkOS requires verified email for password auth; disabling the verification
-      # email in the dashboard does NOT lift that). Set false once /auth/verify exists.
-      mark-email-verified-on-register: ${WORKOS_MARK_EMAIL_VERIFIED:true}
+      # Create users already email-verified, bypassing email-ownership proof. This is
+      # a DEV-ONLY shortcut (so headless local sign-up isn't blocked by WorkOS's
+      # verified-email requirement). It defaults to false and the app REFUSES TO BOOT
+      # with it true unless dev-mode is on — see WorkosClient. In prod, leave it false
+      # and let WorkOS-hosted email verification gate password auth.
+      mark-email-verified-on-register: ${WORKOS_MARK_EMAIL_VERIFIED:false}
 
     # ── Self-service provisioning (optional) ────────────────────────────────
     # If set, /auth/register provisions the new user into core-engine via the

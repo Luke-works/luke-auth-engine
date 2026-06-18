@@ -5,7 +5,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -23,15 +22,16 @@ public class SessionService {
 
     private final GatewayKeys gatewayKeys;
     private final PermissionsClient client;
-    private final long cacheTtlMillis;
 
-    private final Map<String, Cached> cache = new ConcurrentHashMap<>();
+    /** Bounded + TTL'd so it can't grow without limit (was an unbounded map). */
+    private final BoundedTtlCache<Map<String, Object>> cache;
 
     public SessionService(GatewayKeys gatewayKeys, PermissionsClient client,
-                          @Value("${luke.auth.session.cache-ttl-seconds:60}") long cacheTtlSeconds) {
+                          @Value("${luke.auth.session.cache-ttl-seconds:60}") long cacheTtlSeconds,
+                          @Value("${luke.auth.session.cache-max-entries:10000}") int cacheMaxEntries) {
         this.gatewayKeys = gatewayKeys;
         this.client = client;
-        this.cacheTtlMillis = cacheTtlSeconds * 1000;
+        this.cache = new BoundedTtlCache<>(cacheMaxEntries, cacheTtlSeconds * 1000);
     }
 
     /**
@@ -50,11 +50,10 @@ public class SessionService {
      */
     public Map<String, Object> session(String engineUserId, String requestedTenant, boolean bypassCache) throws Exception {
         String cacheKey = engineUserId + "|" + (requestedTenant == null ? "" : requestedTenant);
-        long now = System.currentTimeMillis();
         if (!bypassCache) {
-            Cached hit = cache.get(cacheKey);
-            if (hit != null && hit.expiresAt > now) {
-                return hit.body;
+            Map<String, Object> hit = cache.get(cacheKey);
+            if (hit != null) {
+                return hit;
             }
         }
 
@@ -69,7 +68,7 @@ public class SessionService {
             // the user can sign in and then create their organization (self-service).
             if (e.status() == 403) {
                 Map<String, Object> empty = unprovisioned(engineUserId);
-                cache.put(cacheKey, new Cached(empty, now + cacheTtlMillis));
+                cache.put(cacheKey, empty);
                 return empty;
             }
             throw e;
@@ -101,7 +100,7 @@ public class SessionService {
         body.put("capabilities", capabilities);
         body.put("can", flatten(roles, capabilities));
 
-        cache.put(cacheKey, new Cached(body, now + cacheTtlMillis));
+        cache.put(cacheKey, body);
         return body;
     }
 
@@ -150,8 +149,6 @@ public class SessionService {
         });
         return can;
     }
-
-    private record Cached(Map<String, Object> body, long expiresAt) {}
 
     /** The user asked to act in a tenant they don't belong to. */
     public static class TenantForbiddenException extends RuntimeException {

@@ -204,15 +204,12 @@ public class AuthController {
         }
         try {
             Map<String, Object> auth = workos.authenticateWithCode(code);
-            String accessToken = String.valueOf(auth.get("access_token"));
+            // Establish the session via the HttpOnly refresh cookie ONLY. We do NOT
+            // put the access token (or sid) in the redirect URL: bearer tokens in URLs
+            // leak via browser history, Referer, proxies, and logs (OWASP). The SPA
+            // completes the session from the refresh cookie via /auth/refresh.
             setRefreshCookie(response, str(auth.get("refresh_token")));
-
-            Jwt jwt = verifier.verify(accessToken);
-            String sid = jwt.getClaimAsString("sid");
-            // Hand the SPA its access token via the URL fragment (kept out of
-            // server logs / Referer); the UI then calls /session as usual.
-            String to = uiCallbackUrl + "#access_token=" + accessToken + (sid != null ? "&sid=" + sid : "");
-            return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(to)).build();
+            return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(uiCallbackUrl)).build();
         } catch (Exception e) {
             log.warn("Social callback failed: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.FOUND)

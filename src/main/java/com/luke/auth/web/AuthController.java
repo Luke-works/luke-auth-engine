@@ -125,9 +125,17 @@ public class AuthController {
             try {
                 onboarding.provision(engineUserId, req.firstName(), req.lastName(), req.email());
             } catch (OnboardingClient.OnboardingException e) {
-                // The identity exists in WorkOS but engine provisioning failed.
-                // Surface it rather than silently leaving a half-onboarded user.
-                log.error("Provisioning failed after WorkOS user creation for {}", engineUserId, e);
+                // Provisioning failed AFTER the WorkOS user was created. Roll the WorkOS
+                // user back so we don't leave an orphan that blocks retry (the email would
+                // otherwise stay taken). Best-effort cleanup; log if it fails.
+                log.error("Provisioning failed after WorkOS user creation for {} — rolling back WorkOS user {}",
+                        engineUserId, workosUserId, e);
+                try {
+                    workos.deleteUser(workosUserId);
+                } catch (Exception cleanup) {
+                    log.error("Rollback of orphaned WorkOS user {} failed; manual cleanup may be needed",
+                            workosUserId, cleanup);
+                }
                 return error(HttpStatus.BAD_GATEWAY, "Provisioning failed", e.getMessage());
             }
 

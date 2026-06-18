@@ -3,6 +3,7 @@ package com.luke.auth.session;
 import com.luke.auth.config.GatewayKeys;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -14,10 +15,13 @@ import org.springframework.web.bind.annotation.RestController;
  * resource servers (e.g. capability-engine) can be exercised locally without a
  * real Clerk login. Returns 404 unless {@code luke.auth.dev-mode=true}.
  *
- * <p>NEVER enable dev-mode in shared/prod environments — this hands out
- * act-as-anyone tokens.
+ * <p>Defense-in-depth: the bean is registered ONLY under the {@code dev} Spring
+ * profile, so in any prod profile the endpoint does not exist at all — on top of
+ * the runtime {@code dev-mode} check. NEVER enable dev-mode in shared/prod
+ * environments — this hands out act-as-anyone tokens. See {@code DevModeGuard}.
  */
 @RestController
+@Profile("dev")
 public class DevTokenController {
 
     private final GatewayKeys gatewayKeys;

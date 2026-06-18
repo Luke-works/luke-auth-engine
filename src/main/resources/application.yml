@@ -17,8 +17,11 @@ luke:
       base-url: ${CAPABILITIES_BASE_URL:http://localhost:8082}
 
     # ── /session translator ─────────────────────────────────────────────────
-    # dev-mode allows an X-Dev-User header to stand in for a verified Clerk
-    # token — LOCAL TESTING ONLY; never enable in shared/prod environments.
+    # dev-mode allows an X-Dev-User header / /dev/token to stand in for a verified
+    # login — LOCAL TESTING ONLY; never enable in shared/prod environments. It also
+    # REQUIRES the 'dev' Spring profile (SPRING_PROFILES_ACTIVE=dev): the app fails to
+    # boot if dev-mode is on without it, so one env var can't open the backdoors in
+    # prod. See DevModeGuard.
     dev-mode: ${LUKE_AUTH_DEV_MODE:false}
     session:
       cache-ttl-seconds: ${SESSION_CACHE_TTL:60}

@@ -41,7 +41,7 @@ class PermissionsClientRetryTest {
     }
 
     private PermissionsClient client(String base) {
-        return new PermissionsClient(base, base, 3, 1); // 3 attempts, 1ms backoff
+        return new PermissionsClient(base, 3, 1); // 3 attempts, 1ms backoff
     }
 
     @Test

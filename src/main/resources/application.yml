@@ -9,12 +9,10 @@ spring:
 luke:
   auth:
     # ── Upstream engine the gateway proxies to ──────────────────────────────
+    # Capability was merged into core-engine, so /api/my-capabilities and every
+    # other /api/** route are served here (no separate capability backend).
     core-engine:
       base-url: ${CORE_ENGINE_URL:http://localhost:8080}
-
-    # ── capability-engine (capability access read for /session) ─────────────
-    capability-engine:
-      base-url: ${CAPABILITIES_BASE_URL:http://localhost:8082}
 
     # ── Rate limiting (credential / token endpoints) ────────────────────────
     # Per client IP + path fixed window over /auth/login,/auth/register,

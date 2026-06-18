@@ -163,19 +163,36 @@ public class AuthController {
 
     @GetMapping("/social")
     public ResponseEntity<?> social(@RequestParam String provider,
-                                    @RequestParam(required = false) String state) {
+                                    @RequestParam(required = false) String state,
+                                    HttpServletResponse response) {
         String workosProvider = PROVIDERS.getOrDefault(provider.toLowerCase(), provider);
-        String url = workos.authorizationUrl(workosProvider, state);
+        // CSRF: bind this authorization request to the browser. Generate a random
+        // state nonce, store it in a short-lived HttpOnly cookie, and pass it to
+        // WorkOS; /callback rejects any response whose state doesn't match. (A
+        // client-supplied state is ignored — it can't be trusted as a CSRF token.)
+        String nonce = newStateNonce();
+        response.addHeader(HttpHeaders.SET_COOKIE, stateCookie(nonce, 600));
+        String url = workos.authorizationUrl(workosProvider, nonce);
         return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(url)).build();
     }
 
     @GetMapping("/callback")
     public ResponseEntity<?> callback(@RequestParam(required = false) String code,
+                                      @RequestParam(required = false) String state,
                                       @RequestParam(required = false) String error,
+                                      @CookieValue(value = STATE_COOKIE, required = false) String stateCookieValue,
                                       HttpServletResponse response) {
+        // One-time use: always clear the state cookie on the way out.
+        response.addHeader(HttpHeaders.SET_COOKIE, stateCookie("", 0));
         if (error != null || code == null) {
             String to = uiCallbackUrl + "#error=" + (error == null ? "missing_code" : error);
             return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(to)).build();
+        }
+        // CSRF: the state echoed back by WorkOS must match the cookie set in /social.
+        if (isBlank(state) || isBlank(stateCookieValue) || !constantTimeEquals(state, stateCookieValue)) {
+            log.warn("Social callback rejected: OAuth state mismatch");
+            return ResponseEntity.status(HttpStatus.FOUND)
+                    .location(URI.create(uiCallbackUrl + "#error=invalid_state")).build();
         }
         try {
             Map<String, Object> auth = workos.authenticateWithCode(code);
@@ -262,12 +279,17 @@ public class AuthController {
             // Verify the current password by re-authenticating (needs the user's email).
             String email = str(workos.getUser(userId).get("email"));
             if (email == null) return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", "Could not resolve user");
-            if (!isBlank(req.currentPassword())) {
-                try {
-                    workos.authenticateWithPassword(email, req.currentPassword());
-                } catch (WorkosClient.WorkosException e) {
-                    return error(HttpStatus.FORBIDDEN, "Forbidden", "Current password is incorrect");
-                }
+            // Always require and verify the current password — a password change
+            // for an authenticated session must prove knowledge of the existing
+            // password (otherwise a stolen/short-lived access token is enough to
+            // take the account over).
+            if (isBlank(req.currentPassword())) {
+                return error(HttpStatus.BAD_REQUEST, "Bad Request", "currentPassword is required");
+            }
+            try {
+                workos.authenticateWithPassword(email, req.currentPassword());
+            } catch (WorkosClient.WorkosException e) {
+                return error(HttpStatus.FORBIDDEN, "Forbidden", "Current password is incorrect");
             }
             workos.updateUser(userId, Map.of("password", req.newPassword()));
             return ResponseEntity.ok(Map.of("ok", true));
@@ -508,6 +530,39 @@ public class AuthController {
                 .append("; SameSite=").append(cookieSameSite);
         if (cookieSecure) sb.append("; Secure");
         return sb.toString();
+    }
+
+    // ── OAuth state (CSRF protection for the social/SSO redirect) ─────────────
+
+    private static final String STATE_COOKIE = "luke_oauth_state";
+    private static final java.security.SecureRandom STATE_RANDOM = new java.security.SecureRandom();
+
+    /** A 256-bit URL-safe random nonce used as the OAuth {@code state}. */
+    private static String newStateNonce() {
+        byte[] b = new byte[32];
+        STATE_RANDOM.nextBytes(b);
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(b);
+    }
+
+    /**
+     * The state cookie. {@code SameSite=Lax} (forced, not the configurable value
+     * used for the refresh cookie) so it is sent on the top-level GET redirect
+     * back from WorkOS to {@code /auth/callback}.
+     */
+    private String stateCookie(String value, long maxAgeSeconds) {
+        StringBuilder sb = new StringBuilder(STATE_COOKIE).append('=').append(value)
+                .append("; Path=/auth")
+                .append("; HttpOnly")
+                .append("; Max-Age=").append(maxAgeSeconds)
+                .append("; SameSite=Lax");
+        if (cookieSecure) sb.append("; Secure");
+        return sb.toString();
+    }
+
+    private static boolean constantTimeEquals(String a, String b) {
+        return java.security.MessageDigest.isEqual(
+                a.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                b.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     private static boolean isBlank(String s) { return s == null || s.isBlank(); }

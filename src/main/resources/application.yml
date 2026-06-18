@@ -16,6 +16,14 @@ luke:
     capability-engine:
       base-url: ${CAPABILITIES_BASE_URL:http://localhost:8082}
 
+    # ── Rate limiting (credential / token endpoints) ────────────────────────
+    # Per client IP + path fixed window over /auth/login,/auth/register,
+    # /auth/password,/service/token. In-memory (per instance). Conservative default.
+    ratelimit:
+      max-requests: ${AUTH_RATELIMIT_MAX:10}
+      window-seconds: ${AUTH_RATELIMIT_WINDOW_SECONDS:60}
+      max-keys: ${AUTH_RATELIMIT_MAX_KEYS:50000}
+
     # ── /session translator ─────────────────────────────────────────────────
     # dev-mode allows an X-Dev-User header / /dev/token to stand in for a verified
     # login — LOCAL TESTING ONLY; never enable in shared/prod environments. It also

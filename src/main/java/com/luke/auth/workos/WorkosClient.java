@@ -182,6 +182,12 @@ public class WorkosClient {
         return apiBase + LOGOUT_PATH + "?session_id=" + enc(sessionId);
     }
 
+    /** Revoke a WorkOS session server-side (does not rely on the browser following a
+     *  logout URL). Best-effort: callers should ignore failures. */
+    public void revokeSession(String sessionId) {
+        postJson("/user_management/sessions/" + enc(sessionId) + "/revoke", new LinkedHashMap<>(), /*bearer=*/true);
+    }
+
     // ────────────────────────────────────────────────────────────────────────
 
     private Map<String, Object> baseAuth(String grantType) {

@@ -30,6 +30,18 @@ class BoundedTtlCacheTest {
     }
 
     @Test
+    void invalidatePrefixDropsOnlyMatchingKeys() {
+        BoundedTtlCache<String> c = new BoundedTtlCache<>(10, 60_000);
+        c.put("user|A", "1");
+        c.put("user|B", "2");
+        c.put("other|A", "3");
+        c.invalidatePrefix("user|");
+        assertNull(c.get("user|A"));
+        assertNull(c.get("user|B"));
+        assertEquals("3", c.get("other|A"));
+    }
+
+    @Test
     void sizeNeverExceedsTheCap() {
         BoundedTtlCache<String> c = new BoundedTtlCache<>(3, 60_000);
         for (int i = 0; i < 1_000; i++) {

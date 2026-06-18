@@ -105,6 +105,17 @@ public class SessionService {
     }
 
     /**
+     * Drop all cached session entries for a user (every tenant). Called on logout /
+     * account deletion so a stale cached authorization view is not honored after the
+     * session ends. Cache keys are {@code engineUserId + "|" + tenant}.
+     */
+    public void invalidate(String engineUserId) {
+        if (engineUserId != null && !engineUserId.isBlank()) {
+            cache.invalidatePrefix(engineUserId + "|");
+        }
+    }
+
+    /**
      * Minimal session for an authenticated-but-not-yet-onboarded user: identity only,
      * no tenants/roles/capabilities. {@code provisioned:false} tells the UI to route the
      * user into "create your organization" rather than the app.

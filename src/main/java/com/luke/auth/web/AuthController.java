@@ -242,14 +242,27 @@ public class AuthController {
     @PostMapping("/logout")
     public ResponseEntity<?> logout(HttpServletRequest request, HttpServletResponse response) {
         clearRefreshCookie(response);
-        // Best-effort: end the WorkOS session too, if the caller passed its token.
+        // End the session server-side, not just in the browser: drop the gateway's
+        // cached authorization view for this user and revoke the WorkOS session.
+        // (The access token itself stays valid until it expires — act-as tokens for
+        // gateway.ttl-seconds, the WorkOS token until its own short expiry — that brief
+        // residual window is the trade-off of stateless JWT verification.)
         String header = request.getHeader(HttpHeaders.AUTHORIZATION);
         String logoutUrl = null;
         if (header != null && header.regionMatches(true, 0, "Bearer ", 0, 7)) {
             try {
                 Jwt jwt = verifier.verify(header.substring(7).trim());
+                sessionService.invalidate(identityResolver.toEngineUserId(jwt.getSubject()));
                 String sid = jwt.getClaimAsString("sid");
-                if (sid != null) logoutUrl = workos.logoutUrl(sid);
+                if (sid != null) {
+                    logoutUrl = workos.logoutUrl(sid);
+                    try {
+                        workos.revokeSession(sid); // server-side revoke, best-effort
+                    } catch (Exception revokeFailed) {
+                        log.warn("WorkOS server-side session revoke failed (logout still proceeds): {}",
+                                revokeFailed.getMessage());
+                    }
+                }
             } catch (Exception ignored) {
                 // already expired / invalid — cookie is cleared, nothing more to do
             }
@@ -331,6 +344,9 @@ public class AuthController {
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Delete failed", e.getMessage());
         }
+        // 3. Drop the gateway's cached authorization view so the deleted user's
+        //    session can't be honored from cache until the TTL lapses.
+        sessionService.invalidate(engineUserId);
         clearRefreshCookie(response);
         return ResponseEntity.ok(Map.of("ok", true));
     }

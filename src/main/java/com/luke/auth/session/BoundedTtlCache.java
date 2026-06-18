@@ -50,6 +50,12 @@ class BoundedTtlCache<V> {
         return map.size();
     }
 
+    /** Drop every entry whose key starts with {@code prefix} (e.g. all of a user's
+     *  per-tenant session entries). Used to invalidate a session on logout/delete. */
+    void invalidatePrefix(String prefix) {
+        map.keySet().removeIf(k -> k.startsWith(prefix));
+    }
+
     /** Drop expired entries first, then the soonest-to-expire until under the cap. */
     private void evict() {
         long now = System.currentTimeMillis();

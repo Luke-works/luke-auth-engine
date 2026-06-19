@@ -24,7 +24,6 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.CookieValue;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -56,6 +55,8 @@ import org.springframework.web.bind.annotation.RestController;
 public class AuthController {
 
     private static final Logger log = LoggerFactory.getLogger(AuthController.class);
+    /** Audit channel for privileged org actions (correlation-id tagged via MDC). */
+    private static final Logger audit = LoggerFactory.getLogger("luke.audit.org");
 
     /** Friendly provider aliases → WorkOS provider values. */
     private static final Map<String, String> PROVIDERS = Map.of(
@@ -404,15 +405,27 @@ public class AuthController {
         if (caller.error != null) return caller.error;
         if (isBlank(req.email())) return error(HttpStatus.BAD_REQUEST, "Bad Request", "email is required");
 
+        String email = req.email().trim();
         Map<String, Object> invitee;
         try {
-            invitee = workos.findUserByEmail(req.email().trim());
+            invitee = workos.findUserByEmail(email);
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Lookup failed", e.getMessage());
         }
+
+        // #31: do NOT reveal whether the email is a known platform user (the old 404 vs
+        // success was an enumeration oracle for any tenant-admin). A non-user is INVITED
+        // (consent flow); an existing user is added via core-engine, which authorizes the
+        // admin against the target tenant. BOTH return the same uniform 200.
         if (invitee == null) {
-            return error(HttpStatus.NOT_FOUND, "Not Found",
-                    "No user with that email yet. Send them an invite first.");
+            try {
+                workos.sendInvitation(email, caller.workosUserId);
+            } catch (WorkosClient.WorkosException ignored) {
+                // already invited / WorkOS hiccup — stay uniform, don't leak the reason
+            }
+            audit.info("org-member add → invited (tenant={} actor={} email={})",
+                    caller.tenant, caller.engineUserId, email);
+            return ResponseEntity.ok(Map.of("ok", true));
         }
 
         Map<String, Object> body = new LinkedHashMap<>();
@@ -423,15 +436,14 @@ public class AuthController {
         body.put("role", isBlank(req.role()) ? "tenant-user" : req.role());
         body.put("accessLevel", req.accessLevel());
 
-        CoreAdminClient.CoreResponse core;
         try {
-            core = coreAdmin.createOrgUser(mintActAs(caller.engineUserId), caller.tenant, body);
+            coreAdmin.createOrgUser(mintActAs(caller.engineUserId), caller.tenant, body);
         } catch (CoreAdminClient.CoreException e) {
             return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", e.getMessage());
         }
-        return ResponseEntity.status(core.status())
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(core.body().length == 0 ? new byte[0] : core.body());
+        audit.info("org-member add (tenant={} actor={} target={})",
+                caller.tenant, caller.engineUserId, body.get("id"));
+        return ResponseEntity.ok(Map.of("ok", true));
     }
 
     // ────────────────────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 package com.luke.auth.web;
 
+import com.luke.auth.config.CorrelationIdFilter;
 import com.luke.auth.config.GatewayKeys;
 import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
@@ -20,6 +21,7 @@ import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -60,7 +62,10 @@ public class EngineProxyController {
             // Identity / trust headers the downstream engines honor. The gateway is the
             // SOLE asserter of identity (via the minted act-as token), so a client must
             // never be able to inject these to impersonate a user or a trusted service.
-            "x-user-id", "x-dev-user", "x-internal-key");
+            "x-user-id", "x-dev-user", "x-internal-key",
+            // Correlation id is re-asserted from the (sanitized) MDC value below, so the
+            // raw client header is not copied verbatim.
+            "x-correlation-id");
 
     /** ONLY these upstream response headers are relayed. The engine sits behind its own
      *  Render/Cloudflare edge, so its responses carry infra headers (server, alt-svc,
@@ -187,6 +192,10 @@ public class EngineProxyController {
 
         copyRequestHeaders(request, forward);
         if (actAsToken != null) forward.header(HttpHeaders.AUTHORIZATION, "Bearer " + actAsToken);
+        // Propagate the request's correlation id to core-engine so one trace spans the
+        // gateway → engine hop (CorrelationIdFilter set it on the MDC for this thread).
+        String correlationId = MDC.get(CorrelationIdFilter.MDC_KEY);
+        if (correlationId != null) forward.header(CorrelationIdFilter.HEADER, correlationId);
 
         HttpResponse<byte[]> upstream;
         try {

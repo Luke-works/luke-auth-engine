@@ -122,6 +122,10 @@ management:
       show-details: always
 
 logging:
+  # Tag every log line with the per-request correlation id (CorrelationIdFilter, MDC
+  # key 'correlationId'), forwarded to core-engine so a trace spans the gateway hop.
+  pattern:
+    level: "%5p [cid:%X{correlationId:--}]"
   level:
     root: INFO
     com.luke: DEBUG

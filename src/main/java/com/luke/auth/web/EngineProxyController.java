@@ -7,6 +7,10 @@ import com.luke.auth.identity.IdentityResolver;
 import com.luke.auth.session.PermissionsClient;
 import com.luke.auth.session.SessionService;
 import jakarta.servlet.http.HttpServletRequest;
+import java.io.FilterInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.net.http.HttpClient;
@@ -19,6 +23,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -31,6 +36,7 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtException;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 /**
  * The transparent reverse proxy — the "guide" that walks every consumer request
@@ -85,17 +91,22 @@ public class EngineProxyController {
 
     private final boolean devMode;
 
+    /** Max bytes accepted for a forwarded request body; larger ones get 413. Default 100 MiB. */
+    private final long maxRequestBytes;
+
     public EngineProxyController(WorkosTokenVerifier workosVerifier,
                                  IdentityResolver identityResolver,
                                  GatewayKeys gatewayKeys,
                                  SessionService sessionService,
                                  @Value("${luke.auth.core-engine.base-url}") String coreEngineBaseUrl,
-                                 @Value("${luke.auth.dev-mode:false}") boolean devMode) {
+                                 @Value("${luke.auth.dev-mode:false}") boolean devMode,
+                                 @Value("${luke.auth.proxy.max-request-bytes:104857600}") long maxRequestBytes) {
         this.workosVerifier = workosVerifier;
         this.identityResolver = identityResolver;
         this.gatewayKeys = gatewayKeys;
         this.sessionService = sessionService;
         this.devMode = devMode;
+        this.maxRequestBytes = maxRequestBytes;
         this.coreEngineBaseUrl = stripTrailingSlash(coreEngineBaseUrl);
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
@@ -105,11 +116,17 @@ public class EngineProxyController {
 
     /** Catch-all: forwards every path not claimed by a more specific mapping (JWKS, actuator). */
     @RequestMapping("/**")
-    public ResponseEntity<byte[]> proxy(HttpServletRequest request) throws Exception {
+    public ResponseEntity<?> proxy(HttpServletRequest request) throws Exception {
 
         // CORS preflight is handled by CorsFilter; any stray OPTIONS just succeeds.
         if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
             return ResponseEntity.ok().build();
+        }
+
+        // Reject oversized uploads up front when the client declares the length (#21).
+        // Chunked/unknown-length requests are bounded during streaming by MaxSizeInputStream.
+        if (request.getContentLengthLong() > maxRequestBytes) {
+            return payloadTooLarge();
         }
 
         // Canonicalize the path first: decode percent-escapes and resolve/refuse
@@ -180,15 +197,15 @@ public class EngineProxyController {
         }
 
         // ── 4. Forward to the engine, swapping only Authorization ─────────────
+        // STREAM the request body instead of readAllBytes() (#21): peak heap no longer
+        // scales with (concurrent requests × body size). The body is fed straight from
+        // the servlet input stream, capped by MaxSizeInputStream for chunked uploads.
         URI target = buildTargetUri(request);
-        byte[] body = request.getInputStream().readAllBytes();
+        HttpRequest.BodyPublisher bodyPublisher = bodyPublisherFor(request);
 
         HttpRequest.Builder forward = HttpRequest.newBuilder(target)
                 .timeout(Duration.ofSeconds(60))
-                .method(request.getMethod(),
-                        body.length == 0
-                                ? HttpRequest.BodyPublishers.noBody()
-                                : HttpRequest.BodyPublishers.ofByteArray(body));
+                .method(request.getMethod(), bodyPublisher);
 
         copyRequestHeaders(request, forward);
         if (actAsToken != null) forward.header(HttpHeaders.AUTHORIZATION, "Bearer " + actAsToken);
@@ -197,10 +214,16 @@ public class EngineProxyController {
         String correlationId = MDC.get(CorrelationIdFilter.MDC_KEY);
         if (correlationId != null) forward.header(CorrelationIdFilter.HEADER, correlationId);
 
-        HttpResponse<byte[]> upstream;
+        // STREAM the response too (#21): hand back an InputStream piped to the client,
+        // never the whole body in a byte[].
+        HttpResponse<InputStream> upstream;
         try {
-            upstream = httpClient.send(forward.build(), HttpResponse.BodyHandlers.ofByteArray());
+            upstream = httpClient.send(forward.build(), HttpResponse.BodyHandlers.ofInputStream());
         } catch (Exception e) {
+            if (isPayloadTooLarge(e)) {
+                log.debug("Rejected oversized streamed request body for {} {}", request.getMethod(), target);
+                return payloadTooLarge();
+            }
             log.error("Upstream engine call failed for {} {}", request.getMethod(), target, e);
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
                     .contentType(MediaType.APPLICATION_JSON)
@@ -209,6 +232,23 @@ public class EngineProxyController {
 
         // ── 5. Relay the engine's response back to the consumer ───────────────
         return relay(upstream);
+    }
+
+    /** Streaming body publisher for the forwarded request, or no-body for empty/bodyless methods. */
+    private HttpRequest.BodyPublisher bodyPublisherFor(HttpServletRequest request) {
+        boolean bodyless = "GET".equalsIgnoreCase(request.getMethod())
+                || "HEAD".equalsIgnoreCase(request.getMethod());
+        if (bodyless || request.getContentLengthLong() == 0) {
+            return HttpRequest.BodyPublishers.noBody();
+        }
+        Supplier<InputStream> supplier = () -> {
+            try {
+                return new MaxSizeInputStream(request.getInputStream(), maxRequestBytes);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        };
+        return HttpRequest.BodyPublishers.ofInputStream(supplier);
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -234,7 +274,7 @@ public class EngineProxyController {
         }
     }
 
-    private ResponseEntity<byte[]> relay(HttpResponse<byte[]> upstream) {
+    private ResponseEntity<StreamingResponseBody> relay(HttpResponse<InputStream> upstream) {
         ResponseEntity.BodyBuilder builder = ResponseEntity.status(upstream.statusCode());
         for (Map.Entry<String, List<String>> header : upstream.headers().map().entrySet()) {
             String name = header.getKey();
@@ -245,8 +285,75 @@ public class EngineProxyController {
                 builder.header(name, value);
             }
         }
-        byte[] payload = upstream.body();
-        return builder.body(payload != null ? payload : new byte[0]);
+        // Pipe the engine's response body straight to the client without buffering it.
+        InputStream upstreamBody = upstream.body();
+        StreamingResponseBody body = out -> {
+            try (InputStream in = upstreamBody) {
+                in.transferTo(out);
+            }
+        };
+        return builder.body(body);
+    }
+
+    private ResponseEntity<byte[]> payloadTooLarge() {
+        String json = "{\"error\":\"Payload Too Large\",\"message\":\"Request body exceeds the "
+                + maxRequestBytes + "-byte limit\"}";
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(json.getBytes());
+    }
+
+    /** True if the throwable (or any cause) is our body-size limit breach. */
+    private static boolean isPayloadTooLarge(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof PayloadTooLargeException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Marker for a forwarded request body that exceeded {@code maxRequestBytes}. */
+    private static final class PayloadTooLargeException extends IOException {
+        PayloadTooLargeException(long limit) {
+            super("Request body exceeds the " + limit + "-byte limit");
+        }
+    }
+
+    /**
+     * Caps the number of bytes read from the wrapped stream, throwing
+     * {@link PayloadTooLargeException} once the limit is exceeded. Bounds memory + abuse
+     * for chunked/unknown-length uploads that have no Content-Length to pre-check (#21).
+     */
+    private static final class MaxSizeInputStream extends FilterInputStream {
+        private final long limit;
+        private long count;
+
+        MaxSizeInputStream(InputStream in, long limit) {
+            super(in);
+            this.limit = limit;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int b = super.read();
+            if (b != -1 && ++count > limit) {
+                throw new PayloadTooLargeException(limit);
+            }
+            return b;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            int n = super.read(b, off, len);
+            if (n > 0) {
+                count += n;
+                if (count > limit) {
+                    throw new PayloadTooLargeException(limit);
+                }
+            }
+            return n;
+        }
     }
 
     private String bearerToken(HttpServletRequest request) {

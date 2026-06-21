@@ -37,7 +37,7 @@ class EngineProxyTenantTest {
                 .thenThrow(new SessionService.TenantForbiddenException("tenant-B"));
 
         EngineProxyController proxy =
-                new EngineProxyController(verifier, idr, keys, sessions, "http://core", false, 104857600L);
+                new EngineProxyController(verifier, idr, keys, sessions, "http://core", false);
 
         HttpServletRequest req = mock(HttpServletRequest.class);
         when(req.getMethod()).thenReturn("GET");
@@ -45,7 +45,7 @@ class EngineProxyTenantTest {
         when(req.getHeader("Authorization")).thenReturn("Bearer tok");
         when(req.getHeader("X-Tenant-Id")).thenReturn("tenant-B");
 
-        ResponseEntity<?> resp = proxy.proxy(req);
+        ResponseEntity<byte[]> resp = proxy.proxy(req);
 
         assertEquals(403, resp.getStatusCode().value());
         // Rejected before any act-as token is minted or the request is forwarded.

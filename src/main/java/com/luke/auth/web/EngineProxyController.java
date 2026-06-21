@@ -274,7 +274,7 @@ public class EngineProxyController {
         }
     }
 
-    private ResponseEntity<StreamingResponseBody> relay(HttpResponse<InputStream> upstream) {
+    private ResponseEntity<?> relay(HttpResponse<InputStream> upstream) throws IOException {
         ResponseEntity.BodyBuilder builder = ResponseEntity.status(upstream.statusCode());
         for (Map.Entry<String, List<String>> header : upstream.headers().map().entrySet()) {
             String name = header.getKey();
@@ -285,10 +285,30 @@ public class EngineProxyController {
                 builder.header(name, value);
             }
         }
-        // Pipe the engine's response body straight to the client without buffering it.
+
+        // Buffer the engine's response up to a cap and return it whole. Engine traffic is
+        // request/response JSON (no SSE/streaming/download endpoints downstream), so this
+        // can't stall a long-lived body — and it avoids handing a StreamingResponseBody to
+        // the async servlet dispatch, which was surfacing tiny JSON bodies to the browser
+        // as an empty 200. Only a body larger than the cap is streamed (already-read prefix
+        // first, then the rest) so large payloads still never sit fully in heap (#21).
+        final int cap = 1_048_576; // 1 MiB
         InputStream upstreamBody = upstream.body();
+        byte[] head = upstreamBody.readNBytes(cap + 1);
+        if (head.length <= cap) {
+            upstreamBody.close();
+            int code = upstream.statusCode();
+            if (head.length == 0 && code >= 200 && code < 300) {
+                log.warn("relay: upstream returned an EMPTY body for a {} response", code);
+            } else {
+                log.debug("relay: buffered {} bytes (status {})", head.length, code);
+            }
+            return builder.body(head);
+        }
+        log.debug("relay: streaming large body >{}B (status {})", cap, upstream.statusCode());
         StreamingResponseBody body = out -> {
             try (InputStream in = upstreamBody) {
+                out.write(head);
                 in.transferTo(out);
             }
         };

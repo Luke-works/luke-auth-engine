@@ -43,15 +43,17 @@ public class ServiceTokenController {
     @PostMapping("/service/token")
     public ResponseEntity<?> token(@RequestHeader(value = "X-Service-Key", required = false) String key,
                                    HttpServletRequest request) throws Exception {
-        String userId = registry.resolve(key);
-        if (userId == null) {
-            // An unknown/missing service key is a security-relevant denial — record it.
+        ServiceKeyRegistry.Resolved resolved = registry.resolve(key);
+        if (resolved == null) {
+            // An unknown / missing / EXPIRED service key is a security-relevant denial.
             auditService.record("service.token", AuditService.DENIED, "-", request);
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body(Map.of("error", "Unauthorized", "message", "Unknown or missing service key"));
+                    .body(Map.of("error", "Unauthorized", "message", "Unknown, missing, or expired service key"));
         }
-        // Service-token issuance IS an act-as mint for the service identity — audit it.
-        auditService.record("service.token", AuditService.SUCCESS, userId, userId, null, request);
+        String userId = resolved.userId();
+        // Service-token issuance IS an act-as mint for the service identity — audit it,
+        // recording the non-secret keyId so a leaked/abused key is identifiable (#39).
+        auditService.record("service.token", AuditService.SUCCESS, userId, resolved.keyId(), null, request);
         return ResponseEntity.ok(Map.of(
                 "token", gatewayKeys.mintActAsToken(userId),
                 "tokenType", "Bearer",

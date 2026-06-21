@@ -37,7 +37,7 @@ class EngineProxyTenantTest {
                 .thenThrow(new SessionService.TenantForbiddenException("tenant-B"));
 
         EngineProxyController proxy =
-                new EngineProxyController(verifier, idr, keys, sessions, "http://core", false);
+                new EngineProxyController(verifier, idr, keys, sessions, "http://core", false, 104857600L);
 
         HttpServletRequest req = mock(HttpServletRequest.class);
         when(req.getMethod()).thenReturn("GET");

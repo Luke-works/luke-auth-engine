@@ -36,6 +36,7 @@ class AuthControllerCallbackTest {
                 mock(SessionService.class),
                 mock(GatewayKeys.class),
                 mock(CoreAdminClient.class),
+                new com.luke.auth.audit.AuditService(),
                 "http://ui/cb", true, "Lax");
 
         MockHttpServletResponse response = new MockHttpServletResponse();

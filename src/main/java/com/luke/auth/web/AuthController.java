@@ -1,5 +1,6 @@
 package com.luke.auth.web;
 
+import com.luke.auth.audit.AuditService;
 import com.luke.auth.config.GatewayKeys;
 import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
@@ -55,8 +56,6 @@ import org.springframework.web.bind.annotation.RestController;
 public class AuthController {
 
     private static final Logger log = LoggerFactory.getLogger(AuthController.class);
-    /** Audit channel for privileged org actions (correlation-id tagged via MDC). */
-    private static final Logger audit = LoggerFactory.getLogger("luke.audit.org");
 
     /** Friendly provider aliases → WorkOS provider values. */
     private static final Map<String, String> PROVIDERS = Map.of(
@@ -75,6 +74,7 @@ public class AuthController {
     private final SessionService sessionService;
     private final GatewayKeys gatewayKeys;
     private final CoreAdminClient coreAdmin;
+    private final AuditService auditService;
 
     private final String uiCallbackUrl;
     private final boolean cookieSecure;
@@ -87,6 +87,7 @@ public class AuthController {
                           SessionService sessionService,
                           GatewayKeys gatewayKeys,
                           CoreAdminClient coreAdmin,
+                          AuditService auditService,
                           @Value("${luke.auth.workos.ui-callback-url:http://localhost:5173/sso-callback}") String uiCallbackUrl,
                           @Value("${luke.auth.workos.cookie-secure:true}") boolean cookieSecure,
                           @Value("${luke.auth.workos.cookie-same-site:Lax}") String cookieSameSite) {
@@ -97,6 +98,7 @@ public class AuthController {
         this.sessionService = sessionService;
         this.gatewayKeys = gatewayKeys;
         this.coreAdmin = coreAdmin;
+        this.auditService = auditService;
         this.uiCallbackUrl = uiCallbackUrl;
         this.cookieSecure = cookieSecure;
         this.cookieSameSite = cookieSameSite;
@@ -112,7 +114,7 @@ public class AuthController {
     // ── Register ────────────────────────────────────────────────────────────
 
     @PostMapping("/register")
-    public ResponseEntity<?> register(@RequestBody RegisterRequest req) {
+    public ResponseEntity<?> register(@RequestBody RegisterRequest req, HttpServletRequest request) {
         if (isBlank(req.email()) || isBlank(req.password())) {
             return error(HttpStatus.BAD_REQUEST, "Bad Request", "email and password are required");
         }
@@ -145,8 +147,10 @@ public class AuthController {
             body.put("workosUserId", workosUserId);
             body.put("user", userView(user));
             body.put("verifyRequired", !Boolean.TRUE.equals(user.get("email_verified")));
+            auditService.record("auth.register", AuditService.SUCCESS, engineUserId, req.email(), null, request);
             return ResponseEntity.status(HttpStatus.CREATED).body(body);
         } catch (WorkosClient.WorkosException e) {
+            auditService.record("auth.register", AuditService.FAILURE, "-", req.email(), null, request);
             return error(HttpStatus.valueOf(normalize(e.status())), "Registration failed", e.getMessage());
         }
     }
@@ -161,9 +165,15 @@ public class AuthController {
         }
         try {
             Map<String, Object> auth = workos.authenticateWithPassword(req.email(), req.password());
-            return sessionResponse(auth, request.getHeader("X-Tenant-Id"), response);
+            ResponseEntity<?> resp = sessionResponse(auth, request.getHeader("X-Tenant-Id"), response);
+            String outcome = resp.getStatusCode().is2xxSuccessful() ? AuditService.SUCCESS : AuditService.FAILURE;
+            auditService.record("auth.login", outcome, req.email(), req.email(),
+                    request.getHeader("X-Tenant-Id"), request);
+            return resp;
         } catch (WorkosClient.WorkosException e) {
             // e.g. invalid credentials, or email_verification_required.
+            auditService.record("auth.login", AuditService.FAILURE, "-", req.email(),
+                    request.getHeader("X-Tenant-Id"), request);
             return error(HttpStatus.valueOf(normalize(e.status())), "Login failed", e.getMessage());
         }
     }
@@ -228,9 +238,14 @@ public class AuthController {
         }
         try {
             Map<String, Object> auth = workos.authenticateWithRefreshToken(refreshToken);
-            return sessionResponse(auth, request.getHeader("X-Tenant-Id"), response);
+            ResponseEntity<?> resp = sessionResponse(auth, request.getHeader("X-Tenant-Id"), response);
+            auditService.record("auth.refresh",
+                    resp.getStatusCode().is2xxSuccessful() ? AuditService.SUCCESS : AuditService.FAILURE,
+                    "-", request);
+            return resp;
         } catch (WorkosClient.WorkosException e) {
             clearRefreshCookie(response);
+            auditService.record("auth.refresh", AuditService.FAILURE, "-", request);
             return error(HttpStatus.UNAUTHORIZED, "Unauthorized", "Could not refresh session");
         }
     }
@@ -250,7 +265,9 @@ public class AuthController {
         if (header != null && header.regionMatches(true, 0, "Bearer ", 0, 7)) {
             try {
                 Jwt jwt = verifier.verify(header.substring(7).trim());
-                sessionService.invalidate(identityResolver.toEngineUserId(jwt.getSubject()));
+                String engineUserId = identityResolver.toEngineUserId(jwt.getSubject());
+                sessionService.invalidate(engineUserId);
+                auditService.record("auth.logout", AuditService.SUCCESS, engineUserId, request);
                 String sid = jwt.getClaimAsString("sid");
                 if (sid != null) {
                     logoutUrl = workos.logoutUrl(sid);
@@ -283,6 +300,7 @@ public class AuthController {
         if (fields.isEmpty()) return error(HttpStatus.BAD_REQUEST, "Bad Request", "Nothing to update");
         try {
             Map<String, Object> updated = workos.updateUser(userId, fields);
+            auditService.record("auth.profile_change", AuditService.SUCCESS, userId, request);
             return ResponseEntity.ok(Map.of("user", userView(updated)));
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Update failed", e.getMessage());
@@ -308,9 +326,11 @@ public class AuthController {
             try {
                 workos.authenticateWithPassword(email, req.currentPassword());
             } catch (WorkosClient.WorkosException e) {
+                auditService.record("auth.password_change", AuditService.DENIED, userId, request);
                 return error(HttpStatus.FORBIDDEN, "Forbidden", "Current password is incorrect");
             }
             workos.updateUser(userId, Map.of("password", req.newPassword()));
+            auditService.record("auth.password_change", AuditService.SUCCESS, userId, request);
             return ResponseEntity.ok(Map.of("ok", true));
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Password change failed", e.getMessage());
@@ -346,6 +366,7 @@ public class AuthController {
         //    session can't be honored from cache until the TTL lapses.
         sessionService.invalidate(engineUserId);
         clearRefreshCookie(response);
+        auditService.record("auth.account_delete", AuditService.SUCCESS, engineUserId, request);
         return ResponseEntity.ok(Map.of("ok", true));
     }
 
@@ -359,6 +380,8 @@ public class AuthController {
         if (isBlank(req.email())) return error(HttpStatus.BAD_REQUEST, "Bad Request", "email is required");
         try {
             Map<String, Object> inv = workos.sendInvitation(req.email().trim(), caller.workosUserId);
+            auditService.record("org.invite", AuditService.SUCCESS, caller.engineUserId,
+                    req.email().trim(), caller.tenant, request);
             return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("ok", true, "invitation", invitationView(inv)));
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Invite failed", e.getMessage());
@@ -393,6 +416,8 @@ public class AuthController {
         if (caller.error != null) return caller.error;
         try {
             workos.revokeInvitation(id);
+            auditService.record("org.invite_revoke", AuditService.SUCCESS, caller.engineUserId,
+                    id, caller.tenant, request);
             return ResponseEntity.ok(Map.of("ok", true));
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Revoke failed", e.getMessage());
@@ -423,8 +448,8 @@ public class AuthController {
             } catch (WorkosClient.WorkosException ignored) {
                 // already invited / WorkOS hiccup — stay uniform, don't leak the reason
             }
-            audit.info("org-member add → invited (tenant={} actor={} email={})",
-                    caller.tenant, caller.engineUserId, email);
+            auditService.record("org.member_add_invited", AuditService.SUCCESS, caller.engineUserId,
+                    email, caller.tenant, request);
             return ResponseEntity.ok(Map.of("ok", true));
         }
 
@@ -441,8 +466,8 @@ public class AuthController {
         } catch (CoreAdminClient.CoreException e) {
             return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", e.getMessage());
         }
-        audit.info("org-member add (tenant={} actor={} target={})",
-                caller.tenant, caller.engineUserId, body.get("id"));
+        auditService.record("org.member_add", AuditService.SUCCESS, caller.engineUserId,
+                str(body.get("id")), caller.tenant, request);
         return ResponseEntity.ok(Map.of("ok", true));
     }
 

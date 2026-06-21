@@ -129,3 +129,6 @@ logging:
   level:
     root: INFO
     com.luke: DEBUG
+    # Dedicated audit trail (#24): privileged/auth events on the 'luke.audit' logger.
+    # Keep at INFO so the trail is always emitted; filter the log store by this name.
+    luke.audit: INFO

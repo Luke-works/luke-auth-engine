@@ -9,6 +9,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.luke.auth.audit.AuditService;
 import com.luke.auth.config.GatewayKeys;
 import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
@@ -40,7 +41,7 @@ class AuthControllerAddMemberTest {
     @BeforeEach
     void setUp() throws Exception {
         controller = new AuthController(workos, verifier, idr, mock(OnboardingClient.class),
-                sessions, keys, coreAdmin, "http://ui/cb", true, "Lax");
+                sessions, keys, coreAdmin, new AuditService(), "http://ui/cb", true, "Lax");
         Jwt jwt = mock(Jwt.class);
         when(jwt.getSubject()).thenReturn("workos|admin");
         when(verifier.verify("tok")).thenReturn(jwt);

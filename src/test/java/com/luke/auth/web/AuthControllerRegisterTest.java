@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.luke.auth.audit.AuditService;
 import com.luke.auth.config.GatewayKeys;
 import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
@@ -16,6 +17,7 @@ import com.luke.auth.workos.WorkosClient;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.ResponseEntity;
+import org.springframework.mock.web.MockHttpServletRequest;
 
 /**
  * Guards #30: if engine provisioning fails AFTER the WorkOS user is created,
@@ -43,10 +45,12 @@ class AuthControllerRegisterTest {
                 mock(SessionService.class),
                 mock(GatewayKeys.class),
                 mock(CoreAdminClient.class),
+                new AuditService(),
                 "http://ui/cb", true, "Lax");
 
         ResponseEntity<?> resp = controller.register(
-                new AuthController.RegisterRequest("a@b.com", "pw", "A", "B"));
+                new AuthController.RegisterRequest("a@b.com", "pw", "A", "B"),
+                new MockHttpServletRequest());
 
         assertEquals(502, resp.getStatusCode().value());
         verify(workos).deleteUser("wos_123"); // orphan rolled back so retry can succeed

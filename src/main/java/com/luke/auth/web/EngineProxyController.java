@@ -231,13 +231,7 @@ public class EngineProxyController {
         }
 
         // ── 5. Relay the engine's response back to the consumer ───────────────
-        // Buffer ONLY the small email-onboarding responses: their tiny JSON bodies were
-        // being dropped by the async StreamingResponseBody path and surfacing as an empty
-        // {} in the browser. Scoped to just these paths so list/array endpoints (e.g.
-        // /api/org/users) keep the proven streaming relay untouched.
-        boolean bufferResponse = canonicalPath.startsWith("/api/email-verification")
-                || canonicalPath.startsWith("/api/email-servers");
-        return relay(upstream, bufferResponse);
+        return relay(upstream);
     }
 
     /** Streaming body publisher for the forwarded request, or no-body for empty/bodyless methods. */
@@ -280,7 +274,7 @@ public class EngineProxyController {
         }
     }
 
-    private ResponseEntity<?> relay(HttpResponse<InputStream> upstream, boolean buffer) throws IOException {
+    private ResponseEntity<StreamingResponseBody> relay(HttpResponse<InputStream> upstream) {
         ResponseEntity.BodyBuilder builder = ResponseEntity.status(upstream.statusCode());
         for (Map.Entry<String, List<String>> header : upstream.headers().map().entrySet()) {
             String name = header.getKey();
@@ -291,18 +285,8 @@ public class EngineProxyController {
                 builder.header(name, value);
             }
         }
+        // Pipe the engine's response body straight to the client without buffering it.
         InputStream upstreamBody = upstream.body();
-        // For the small email-onboarding endpoints, read the body fully and return it whole:
-        // the async StreamingResponseBody dispatch was dropping these tiny bodies to an empty
-        // 200. Everything else streams as before (no heap cost for large payloads, and the
-        // proven relay for list endpoints).
-        if (buffer) {
-            byte[] bytes;
-            try (InputStream in = upstreamBody) {
-                bytes = in.readAllBytes();
-            }
-            return builder.body(bytes);
-        }
         StreamingResponseBody body = out -> {
             try (InputStream in = upstreamBody) {
                 in.transferTo(out);

@@ -79,7 +79,10 @@ public class EngineProxyController {
      *  (CORS is added by this service's own CorsFilter, not relayed from the engine). */
     private static final Set<String> RELAY_RESPONSE_HEADERS = Set.of(
             "content-type", "cache-control", "etag", "last-modified",
-            "location", "content-disposition", "www-authenticate", "retry-after");
+            "location", "content-disposition", "www-authenticate", "retry-after",
+            // Route B M2: the embed PAGE sets these and they MUST reach the browser to take effect —
+            // content-security-policy carries the per-tenant frame-ancestors clickjacking policy.
+            "content-security-policy", "x-content-type-options");
 
     private final WorkosTokenVerifier workosVerifier;
     private final IdentityResolver identityResolver;
@@ -138,11 +141,16 @@ public class EngineProxyController {
             return badRequest("Malformed or traversing request path");
         }
 
-        // The ONLY unauthenticated surface: the public embed endpoints. A signed
-        // embed token (validated downstream) is the auth, so we forward these
-        // WITHOUT verifying a WorkOS token and WITHOUT minting an act-as badge.
-        // Scoped to exactly this prefix — nothing else may be public.
-        boolean isPublic = canonicalPath.startsWith("/api/public/");
+        // The unauthenticated surface — a signed embed token (validated downstream) is the auth, so
+        // these are forwarded WITHOUT a WorkOS token and WITHOUT an act-as badge:
+        //  • /api/public/**     — the public embed render/submit API.
+        //  • /embed/{token}     — the public embed PAGE (engine-served HTML carrying the form's
+        //                         per-tenant frame-ancestors clickjacking policy). Route B M2.
+        //  • /embed-assets/**   — that page's self-contained renderer bundle (static js/css).
+        // Scoped to exactly these prefixes — nothing else may be public.
+        boolean isPublic = canonicalPath.startsWith("/api/public/")
+                || canonicalPath.startsWith("/embed/")
+                || canonicalPath.startsWith("/embed-assets/");
 
         String actAsToken = null;
         if (!isPublic) {

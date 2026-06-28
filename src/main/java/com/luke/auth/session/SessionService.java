@@ -76,6 +76,8 @@ public class SessionService {
 
         @SuppressWarnings("unchecked")
         List<String> tenants = (List<String>) core.getOrDefault("tenants", List.of());
+        @SuppressWarnings("unchecked")
+        Map<String, String> tenantNames = (Map<String, String>) core.getOrDefault("tenantNames", Map.of());
         boolean operator = Boolean.TRUE.equals(core.get("operator"));
 
         // 2. Resolve + validate the active tenant (UI picks; we verify membership).
@@ -95,6 +97,7 @@ public class SessionService {
         body.put("tenantAdmin", Boolean.TRUE.equals(core.get("tenantAdmin")));
         body.put("tenant", tenant);
         body.put("tenants", tenants);
+        body.put("tenantNames", tenantNames);
         body.put("roles", roles);
         body.put("candidateGroups", core.getOrDefault("candidateGroups", List.of()));
         body.put("capabilities", capabilities);
@@ -128,6 +131,7 @@ public class SessionService {
         body.put("tenantAdmin", false);
         body.put("tenant", null);
         body.put("tenants", List.of());
+        body.put("tenantNames", Map.of());
         body.put("roles", Map.of());
         body.put("candidateGroups", List.of());
         body.put("capabilities", Map.of());

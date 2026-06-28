@@ -24,6 +24,7 @@ class SessionServiceMembershipTest {
         when(keys.mintActAsToken(anyString())).thenReturn("act");
         Map<String, Object> core = new HashMap<>();
         core.put("tenants", tenants);
+        core.put("tenantNames", Map.of("tenant-A", "Acme", "tenant-B", "Globex"));
         core.put("operator", operator);
         core.put("roles", Map.of());
         when(pc.corePermissions("act")).thenReturn(core);
@@ -47,5 +48,14 @@ class SessionServiceMembershipTest {
     void operatorMayUseAnyTenant() throws Exception {
         Map<String, Object> s = service(true, List.of()).session("op", "tenant-Z");
         assertEquals("tenant-Z", s.get("tenant"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void tenantNamesArePassedThroughForTheSwitcher() throws Exception {
+        Map<String, Object> s = service(false, List.of("tenant-A", "tenant-B")).session("user-1", "tenant-A");
+        Map<String, String> names = (Map<String, String>) s.get("tenantNames");
+        assertEquals("Acme", names.get("tenant-A"));
+        assertEquals("Globex", names.get("tenant-B"));
     }
 }

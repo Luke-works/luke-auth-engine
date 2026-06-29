@@ -14,6 +14,13 @@ luke:
     core-engine:
       base-url: ${CORE_ENGINE_URL:http://localhost:8080}
 
+    # ── DOCUMENTS byte tier (luke-file-proxy) ───────────────────────────────
+    # When set, /api/documents/** is routed HERE (upload→S3, /content←S3) instead of
+    # core, and the gateway injects the vouched X-User-Id (the proxy reads headers,
+    # not the act-as JWT). Blank (local default) → documents fall through to core unchanged.
+    file-proxy:
+      base-url: ${FILE_PROXY_URL:}
+
     # ── Rate limiting (credential / token endpoints) ────────────────────────
     # Per client IP + path fixed window over /auth/login,/auth/register,
     # /auth/password,/service/token. In-memory (per instance). Conservative default.

@@ -80,6 +80,8 @@ public class EngineProxyController {
     private static final Set<String> RELAY_RESPONSE_HEADERS = Set.of(
             "content-type", "cache-control", "etag", "last-modified",
             "location", "content-disposition", "www-authenticate", "retry-after",
+            // DOCUMENTS downloads (/api/documents/{id}/content) advertise byte ranges for react-pdf.
+            "accept-ranges", "content-range",
             // Route B M2: the embed PAGE sets these and they MUST reach the browser to take effect —
             // content-security-policy carries the per-tenant frame-ancestors clickjacking policy.
             "content-security-policy", "x-content-type-options");
@@ -89,6 +91,7 @@ public class EngineProxyController {
     private final GatewayKeys gatewayKeys;
     private final SessionService sessionService;
     private final String coreEngineBaseUrl;
+    private final String fileProxyBaseUrl;
     private final HttpClient httpClient;
 
     private final boolean devMode;
@@ -101,6 +104,7 @@ public class EngineProxyController {
                                  GatewayKeys gatewayKeys,
                                  SessionService sessionService,
                                  @Value("${luke.auth.core-engine.base-url}") String coreEngineBaseUrl,
+                                 @Value("${luke.auth.file-proxy.base-url:}") String fileProxyBaseUrl,
                                  @Value("${luke.auth.dev-mode:false}") boolean devMode,
                                  @Value("${luke.auth.proxy.max-request-bytes:104857600}") long maxRequestBytes) {
         this.workosVerifier = workosVerifier;
@@ -110,6 +114,10 @@ public class EngineProxyController {
         this.devMode = devMode;
         this.maxRequestBytes = maxRequestBytes;
         this.coreEngineBaseUrl = stripTrailingSlash(coreEngineBaseUrl);
+        // The DOCUMENTS byte tier (luke-file-proxy). When unset, /api/documents/** falls through to core
+        // unchanged (no behavior change) — set it to send byte traffic to the proxy instead.
+        this.fileProxyBaseUrl = fileProxyBaseUrl == null || fileProxyBaseUrl.isBlank()
+                ? null : stripTrailingSlash(fileProxyBaseUrl);
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .followRedirects(HttpClient.Redirect.NEVER)
@@ -152,10 +160,15 @@ public class EngineProxyController {
                 || canonicalPath.startsWith("/embed/")
                 || canonicalPath.startsWith("/embed-assets/");
 
+        // Route /api/documents/** to the byte tier (luke-file-proxy) when configured; everything else
+        // (and documents when the proxy URL is unset) goes to core-engine. Documents are NOT public.
+        boolean toFileProxy = fileProxyBaseUrl != null && canonicalPath.startsWith("/api/documents");
+        String baseUrl = toFileProxy ? fileProxyBaseUrl : coreEngineBaseUrl;
+
         String actAsToken = null;
+        String engineUserId = null;
         if (!isPublic) {
             // ── 1. Authenticate: verify the WorkOS wristband ──────────────────
-            String engineUserId = null;
             String workosToken = bearerToken(request);
             if (workosToken != null) {
                 try {
@@ -208,7 +221,7 @@ public class EngineProxyController {
         // scales with (concurrent requests × body size). The body is fed straight from
         // the servlet input stream, capped by MaxSizeInputStream for chunked uploads.
         // (The RESPONSE stays buffered as a byte[] — streaming tiny responses dropped them.)
-        URI target = buildTargetUri(request);
+        URI target = buildTargetUri(request, baseUrl);
         HttpRequest.BodyPublisher bodyPublisher = bodyPublisherFor(request);
 
         HttpRequest.Builder forward = HttpRequest.newBuilder(target)
@@ -217,6 +230,10 @@ public class EngineProxyController {
 
         copyRequestHeaders(request, forward);
         if (actAsToken != null) forward.header(HttpHeaders.AUTHORIZATION, "Bearer " + actAsToken);
+        // The file-proxy reads identity from headers (it does NOT verify the act-as JWT), so the gateway —
+        // the sole identity asserter — injects X-User-Id here. The raw client X-User-Id was stripped on
+        // the way in (SKIP_REQUEST_HEADERS), so this is always the gateway-vouched value, never spoofable.
+        if (toFileProxy && engineUserId != null) forward.header("X-User-Id", engineUserId);
         // Propagate the request's correlation id to core-engine so one trace spans the
         // gateway → engine hop (CorrelationIdFilter set it on the MDC for this thread).
         String correlationId = MDC.get(CorrelationIdFilter.MDC_KEY);
@@ -259,10 +276,10 @@ public class EngineProxyController {
 
     // ────────────────────────────────────────────────────────────────────────
 
-    private URI buildTargetUri(HttpServletRequest request) {
+    private URI buildTargetUri(HttpServletRequest request, String baseUrl) {
         String path = request.getRequestURI();              // already starts with "/"
         String query = request.getQueryString();
-        String url = coreEngineBaseUrl + path + (query != null ? "?" + query : "");
+        String url = baseUrl + path + (query != null ? "?" + query : "");
         return URI.create(url);
     }
 

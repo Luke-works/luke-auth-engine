@@ -30,6 +30,14 @@ class ProxyAuthFunctionalTest {
     }
 
     @Test
+    void documentsPath_withoutToken_isUnauthorized() {
+        // /api/documents/** is the byte tier (luke-file-proxy) but is NOT public — it must still pass
+        // the auth gate so the gateway can inject the vouched X-User-Id. No token → 401.
+        assertEquals(401, rest.getForEntity("/api/documents/some-id/content", String.class)
+                .getStatusCode().value());
+    }
+
+    @Test
     void corsPreflight_isAllowed() {
         ResponseEntity<String> r = rest.exchange(
                 "/api/me/permissions", HttpMethod.OPTIONS, HttpEntity.EMPTY, String.class);

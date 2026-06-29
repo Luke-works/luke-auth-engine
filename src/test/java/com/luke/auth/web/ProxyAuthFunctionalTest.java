@@ -38,6 +38,14 @@ class ProxyAuthFunctionalTest {
     }
 
     @Test
+    void publicDocumentsPath_isForwardedNotBlocked() {
+        // /api/public/documents/** is the token-authorized embed upload surface — public (no WorkOS
+        // token), so it must NOT be rejected with 401 (it forwards; the embed token is the auth).
+        assertNotEquals(401, rest.getForEntity("/api/public/documents?token=x&processRef=y", String.class)
+                .getStatusCode().value());
+    }
+
+    @Test
     void corsPreflight_isAllowed() {
         ResponseEntity<String> r = rest.exchange(
                 "/api/me/permissions", HttpMethod.OPTIONS, HttpEntity.EMPTY, String.class);

@@ -5,6 +5,14 @@ server:
 spring:
   application:
     name: luke-auth-engine
+  servlet:
+    multipart:
+      # This service is a PURE reverse proxy — it must NEVER parse request bodies. Spring's default
+      # multipart resolver eagerly parses multipart uploads (resolve-lazily=false), which consumes the
+      # input stream BEFORE the proxy controller forwards it — so a file upload reaches the engine /
+      # file-proxy as an EMPTY multipart (→ 400 "file is required"). Disabling it leaves the body as a
+      # raw stream that forwards verbatim (Content-Type + boundary preserved).
+      enabled: false
 
 luke:
   auth:

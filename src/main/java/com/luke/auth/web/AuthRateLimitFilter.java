@@ -31,12 +31,20 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
             "/auth/login", "/auth/register", "/auth/password", "/service/token");
 
     private final RateLimiter limiter;
+    /** Number of TRUSTED reverse proxies in front of this service (Render LB, Cloudflare…).
+     *  The leftmost X-Forwarded-For hop is client-authored and spoofable, so with N trusted
+     *  proxies the real client is the Nth entry counted from the right. Default 0 keeps the
+     *  legacy leftmost behaviour (unchanged for local/single-hop dev); set it to the actual
+     *  trusted-proxy count in prod so an attacker can't rotate the key by prepending IPs. */
+    private final int trustedProxyHops;
 
     public AuthRateLimitFilter(
             @Value("${luke.auth.ratelimit.max-requests:10}") int maxRequests,
             @Value("${luke.auth.ratelimit.window-seconds:60}") long windowSeconds,
-            @Value("${luke.auth.ratelimit.max-keys:50000}") int maxKeys) {
+            @Value("${luke.auth.ratelimit.max-keys:50000}") int maxKeys,
+            @Value("${luke.auth.ratelimit.trusted-proxy-hops:0}") int trustedProxyHops) {
         this.limiter = new RateLimiter(maxRequests, windowSeconds * 1000, maxKeys);
+        this.trustedProxyHops = Math.max(0, trustedProxyHops);
     }
 
     @Override
@@ -58,12 +66,19 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
         chain.doFilter(req, res);
     }
 
-    /** Behind Render/Cloudflare, the real client is the leftmost X-Forwarded-For hop. */
-    private static String clientIp(HttpServletRequest req) {
+    /** Resolve the client IP from X-Forwarded-For, counting {@code trustedProxyHops}
+     *  entries from the RIGHT (the trustworthy end appended by our own proxies) rather
+     *  than the spoofable leftmost hop. Falls back to the remote address. */
+    private String clientIp(HttpServletRequest req) {
         String xff = req.getHeader("X-Forwarded-For");
         if (xff != null && !xff.isBlank()) {
-            int comma = xff.indexOf(',');
-            return (comma > 0 ? xff.substring(0, comma) : xff).trim();
+            String[] hops = xff.split(",");
+            if (trustedProxyHops <= 0) {
+                return hops[0].trim(); // legacy: leftmost (dev/single-hop)
+            }
+            // N trusted proxies → the client is the Nth from the right, clamped in-bounds.
+            int idx = Math.max(0, hops.length - trustedProxyHops);
+            return hops[Math.min(idx, hops.length - 1)].trim();
         }
         return req.getRemoteAddr();
     }

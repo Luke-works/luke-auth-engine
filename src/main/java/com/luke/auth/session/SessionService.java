@@ -5,7 +5,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -23,15 +22,16 @@ public class SessionService {
 
     private final GatewayKeys gatewayKeys;
     private final PermissionsClient client;
-    private final long cacheTtlMillis;
 
-    private final Map<String, Cached> cache = new ConcurrentHashMap<>();
+    /** Bounded + TTL'd so it can't grow without limit (was an unbounded map). */
+    private final BoundedTtlCache<Map<String, Object>> cache;
 
     public SessionService(GatewayKeys gatewayKeys, PermissionsClient client,
-                          @Value("${luke.auth.session.cache-ttl-seconds:60}") long cacheTtlSeconds) {
+                          @Value("${luke.auth.session.cache-ttl-seconds:60}") long cacheTtlSeconds,
+                          @Value("${luke.auth.session.cache-max-entries:10000}") int cacheMaxEntries) {
         this.gatewayKeys = gatewayKeys;
         this.client = client;
-        this.cacheTtlMillis = cacheTtlSeconds * 1000;
+        this.cache = new BoundedTtlCache<>(cacheMaxEntries, cacheTtlSeconds * 1000);
     }
 
     /**
@@ -39,11 +39,22 @@ public class SessionService {
      * (nullable → resolve a default). Cached per (user, tenant) for the TTL.
      */
     public Map<String, Object> session(String engineUserId, String requestedTenant) throws Exception {
+        return session(engineUserId, requestedTenant, false);
+    }
+
+    /**
+     * As {@link #session(String, String)}, but {@code bypassCache} skips the cached
+     * entry and recomputes from the systems of record (then refreshes the cache). The
+     * UI uses it right after it changes access, so new roles/capabilities reflect
+     * immediately instead of after the TTL.
+     */
+    public Map<String, Object> session(String engineUserId, String requestedTenant, boolean bypassCache) throws Exception {
         String cacheKey = engineUserId + "|" + (requestedTenant == null ? "" : requestedTenant);
-        Cached hit = cache.get(cacheKey);
-        long now = System.currentTimeMillis();
-        if (hit != null && hit.expiresAt > now) {
-            return hit.body;
+        if (!bypassCache) {
+            Map<String, Object> hit = cache.get(cacheKey);
+            if (hit != null) {
+                return hit;
+            }
         }
 
         // 1. Camunda view — called as the user via a minted act-as token.
@@ -57,7 +68,7 @@ public class SessionService {
             // the user can sign in and then create their organization (self-service).
             if (e.status() == 403) {
                 Map<String, Object> empty = unprovisioned(engineUserId);
-                cache.put(cacheKey, new Cached(empty, now + cacheTtlMillis));
+                cache.put(cacheKey, empty);
                 return empty;
             }
             throw e;
@@ -65,6 +76,8 @@ public class SessionService {
 
         @SuppressWarnings("unchecked")
         List<String> tenants = (List<String>) core.getOrDefault("tenants", List.of());
+        @SuppressWarnings("unchecked")
+        Map<String, String> tenantNames = (Map<String, String>) core.getOrDefault("tenantNames", Map.of());
         boolean operator = Boolean.TRUE.equals(core.get("operator"));
 
         // 2. Resolve + validate the active tenant (UI picks; we verify membership).
@@ -84,13 +97,25 @@ public class SessionService {
         body.put("tenantAdmin", Boolean.TRUE.equals(core.get("tenantAdmin")));
         body.put("tenant", tenant);
         body.put("tenants", tenants);
+        body.put("tenantNames", tenantNames);
         body.put("roles", roles);
         body.put("candidateGroups", core.getOrDefault("candidateGroups", List.of()));
         body.put("capabilities", capabilities);
         body.put("can", flatten(roles, capabilities));
 
-        cache.put(cacheKey, new Cached(body, now + cacheTtlMillis));
+        cache.put(cacheKey, body);
         return body;
+    }
+
+    /**
+     * Drop all cached session entries for a user (every tenant). Called on logout /
+     * account deletion so a stale cached authorization view is not honored after the
+     * session ends. Cache keys are {@code engineUserId + "|" + tenant}.
+     */
+    public void invalidate(String engineUserId) {
+        if (engineUserId != null && !engineUserId.isBlank()) {
+            cache.invalidatePrefix(engineUserId + "|");
+        }
     }
 
     /**
@@ -106,6 +131,7 @@ public class SessionService {
         body.put("tenantAdmin", false);
         body.put("tenant", null);
         body.put("tenants", List.of());
+        body.put("tenantNames", Map.of());
         body.put("roles", Map.of());
         body.put("candidateGroups", List.of());
         body.put("capabilities", Map.of());
@@ -138,8 +164,6 @@ public class SessionService {
         });
         return can;
     }
-
-    private record Cached(Map<String, Object> body, long expiresAt) {}
 
     /** The user asked to act in a tenant they don't belong to. */
     public static class TenantForbiddenException extends RuntimeException {

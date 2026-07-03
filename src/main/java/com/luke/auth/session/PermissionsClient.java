@@ -16,8 +16,9 @@ import org.springframework.stereotype.Component;
  * <ul>
  *   <li>core-engine {@code GET /api/me/permissions} — Camunda roles/tenants/candidate
  *       groups, called with the user's act-as Bearer token;</li>
- *   <li>capability-engine {@code GET /api/my-capabilities} — capability levels,
- *       called with the tenant + user headers.</li>
+ *   <li>core-engine {@code GET /api/my-capabilities} — capability levels (the
+ *       capability domain was merged into core-engine), called with tenant + user
+ *       headers.</li>
  * </ul>
  * Pure I/O: no merging or policy here.
  */
@@ -29,13 +30,16 @@ public class PermissionsClient {
     private static final TypeReference<Map<String, String>> STR_MAP = new TypeReference<>() {};
 
     private final String coreBaseUrl;
-    private final String capabilityBaseUrl;
+    private final int maxAttempts;
+    private final long backoffMillis;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
     public PermissionsClient(@Value("${luke.auth.core-engine.base-url}") String coreBaseUrl,
-                             @Value("${luke.auth.capability-engine.base-url:http://localhost:8082}") String capabilityBaseUrl) {
+                             @Value("${luke.auth.upstream.max-attempts:2}") int maxAttempts,
+                             @Value("${luke.auth.upstream.retry-backoff-ms:200}") long backoffMillis) {
         this.coreBaseUrl = strip(coreBaseUrl);
-        this.capabilityBaseUrl = strip(capabilityBaseUrl);
+        this.maxAttempts = Math.max(1, maxAttempts);
+        this.backoffMillis = Math.max(0, backoffMillis);
     }
 
     /** Camunda view for the user the act-as token asserts. */
@@ -49,13 +53,14 @@ public class PermissionsClient {
 
     /**
      * Capability levels for the user in the tenant, e.g. {@code {"FORMS":"read-write"}}.
-     * Sends the act-as token (capability-engine derives the user from its verified
+     * Sends the act-as token (the engine derives the user from its verified
      * {@code sub} when token verification is on) plus the headers (used when it is
      * off / local dev). The tenant rides as a header — capability access is
      * grant-gated per (tenant, user), so an unverified tenant grants nothing extra.
+     * Served by core-engine since the capability merge (was capability-engine).
      */
     public Map<String, String> capabilities(String tenantId, String userId, String actAsToken) {
-        HttpRequest req = HttpRequest.newBuilder(URI.create(capabilityBaseUrl + "/api/my-capabilities"))
+        HttpRequest req = HttpRequest.newBuilder(URI.create(coreBaseUrl + "/api/my-capabilities"))
                 .timeout(Duration.ofSeconds(15))
                 .header("Authorization", "Bearer " + actAsToken)
                 .header("X-Tenant-Id", tenantId)
@@ -65,17 +70,34 @@ public class PermissionsClient {
     }
 
     private <T> T send(HttpRequest req, TypeReference<T> type) {
-        try {
-            HttpResponse<byte[]> res = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
-            if (res.statusCode() / 100 != 2) {
-                throw new UpstreamException(res.statusCode(), req.uri().getPath() + " returned " + res.statusCode());
+        UpstreamException last = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            UpstreamException failure;
+            boolean retryable;
+            try {
+                HttpResponse<byte[]> res = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+                int code = res.statusCode();
+                if (code / 100 == 2) {
+                    return MAPPER.readValue(res.body(), type);
+                }
+                failure = new UpstreamException(code, req.uri().getPath() + " returned " + code);
+                retryable = code >= 500; // 4xx is deterministic (e.g. 403 unprovisioned) — don't retry
+            } catch (Exception e) {
+                failure = new UpstreamException(0, "Failed calling " + req.uri() + ": " + e.getMessage());
+                retryable = true; // network/timeout — worth a retry
             }
-            return MAPPER.readValue(res.body(), type);
-        } catch (UpstreamException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new UpstreamException(0, "Failed calling " + req.uri() + ": " + e.getMessage());
+            last = failure;
+            if (!retryable || attempt == maxAttempts) {
+                throw failure;
+            }
+            try {
+                Thread.sleep(backoffMillis * attempt); // simple linear backoff
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw failure;
+            }
         }
+        throw last; // unreachable (loop always returns or throws)
     }
 
     private static String strip(String url) {

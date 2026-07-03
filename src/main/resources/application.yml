@@ -5,20 +5,44 @@ server:
 spring:
   application:
     name: luke-auth-engine
+  servlet:
+    multipart:
+      # This service is a PURE reverse proxy — it must NEVER parse request bodies. Spring's default
+      # multipart resolver eagerly parses multipart uploads (resolve-lazily=false), which consumes the
+      # input stream BEFORE the proxy controller forwards it — so a file upload reaches the engine /
+      # file-proxy as an EMPTY multipart (→ 400 "file is required"). Disabling it leaves the body as a
+      # raw stream that forwards verbatim (Content-Type + boundary preserved).
+      enabled: false
 
 luke:
   auth:
     # ── Upstream engine the gateway proxies to ──────────────────────────────
+    # Capability was merged into core-engine, so /api/my-capabilities and every
+    # other /api/** route are served here (no separate capability backend).
     core-engine:
       base-url: ${CORE_ENGINE_URL:http://localhost:8080}
 
-    # ── capability-engine (capability access read for /session) ─────────────
-    capability-engine:
-      base-url: ${CAPABILITIES_BASE_URL:http://localhost:8082}
+    # ── DOCUMENTS byte tier (luke-file-proxy) ───────────────────────────────
+    # When set, /api/documents/** is routed HERE (upload→S3, /content←S3) instead of
+    # core, and the gateway injects the vouched X-User-Id (the proxy reads headers,
+    # not the act-as JWT). Blank (local default) → documents fall through to core unchanged.
+    file-proxy:
+      base-url: ${FILE_PROXY_URL:}
+
+    # ── Rate limiting (credential / token endpoints) ────────────────────────
+    # Per client IP + path fixed window over /auth/login,/auth/register,
+    # /auth/password,/service/token. In-memory (per instance). Conservative default.
+    ratelimit:
+      max-requests: ${AUTH_RATELIMIT_MAX:10}
+      window-seconds: ${AUTH_RATELIMIT_WINDOW_SECONDS:60}
+      max-keys: ${AUTH_RATELIMIT_MAX_KEYS:50000}
 
     # ── /session translator ─────────────────────────────────────────────────
-    # dev-mode allows an X-Dev-User header to stand in for a verified Clerk
-    # token — LOCAL TESTING ONLY; never enable in shared/prod environments.
+    # dev-mode allows an X-Dev-User header / /dev/token to stand in for a verified
+    # login — LOCAL TESTING ONLY; never enable in shared/prod environments. It also
+    # REQUIRES the 'dev' Spring profile (SPRING_PROFILES_ACTIVE=dev): the app fails to
+    # boot if dev-mode is on without it, so one env var can't open the backdoors in
+    # prod. See DevModeGuard.
     dev-mode: ${LUKE_AUTH_DEV_MODE:false}
     session:
       cache-ttl-seconds: ${SESSION_CACHE_TTL:60}
@@ -44,6 +68,10 @@ luke:
       jwks-url: ${WORKOS_JWKS_URL:}
       issuer: ${WORKOS_ISSUER:}
       audience: ${WORKOS_AUDIENCE:}
+      # PROD: set true (with issuer + audience above) to REQUIRE issuer/audience
+      # validation — missing either then fails closed (rejects all tokens) instead
+      # of accepting expiry-only. Left false by default so issuer-less envs keep working.
+      strict-validation: ${WORKOS_STRICT_VALIDATION:false}
       # Where WorkOS sends the browser back after social/SSO login. Must be
       # registered in the WorkOS dashboard's redirect URIs.
       redirect-uri: ${WORKOS_REDIRECT_URI:http://localhost:8083/auth/callback}
@@ -54,10 +82,12 @@ luke:
       # use SameSite=None (+ Secure) only if the UI is on a cross-site domain.
       cookie-secure: ${WORKOS_COOKIE_SECURE:true}
       cookie-same-site: ${WORKOS_COOKIE_SAMESITE:Lax}
-      # TEST-ONLY: create users already email-verified so password login isn't blocked
-      # (WorkOS requires verified email for password auth; disabling the verification
-      # email in the dashboard does NOT lift that). Set false once /auth/verify exists.
-      mark-email-verified-on-register: ${WORKOS_MARK_EMAIL_VERIFIED:true}
+      # Create users already email-verified, bypassing email-ownership proof. This is
+      # a DEV-ONLY shortcut (so headless local sign-up isn't blocked by WorkOS's
+      # verified-email requirement). It defaults to false and the app REFUSES TO BOOT
+      # with it true unless dev-mode is on — see WorkosClient. In prod, leave it false
+      # and let WorkOS-hosted email verification gate password auth.
+      mark-email-verified-on-register: ${WORKOS_MARK_EMAIL_VERIFIED:false}
 
     # ── Self-service provisioning (optional) ────────────────────────────────
     # If set, /auth/register provisions the new user into core-engine via the
@@ -79,6 +109,14 @@ luke:
       # startup and the kid is derived from its thumbprint (engine refetches
       # JWKS automatically after a restart). Set this for a stable prod key.
       private-key: ${GATEWAY_PRIVATE_KEY:}
+      # PROD: set true to REQUIRE a stable GATEWAY_PRIVATE_KEY — boot fails if it's
+      # unset (no ephemeral fallback). Left false so dev/qa can run ephemeral.
+      require-stable-key: ${GATEWAY_REQUIRE_STABLE_KEY:false}
+      # ROTATION: PEM X.509 public key of the PREVIOUS signing key. When set, it's
+      # published in the JWKS alongside the current key so tokens signed by either
+      # kid verify during the overlap window — enabling zero-downtime key rotation.
+      # See docs/key-rotation.md. Retire (unset) once all old tokens have expired.
+      previous-public-key: ${GATEWAY_PREVIOUS_PUBLIC_KEY:}
       issuer: ${GATEWAY_ISSUER:luke-auth-engine}
       audience: ${GATEWAY_AUDIENCE:luke-core-engine}
       # How long an act-as-user token is valid. Short, since it is minted
@@ -96,9 +134,18 @@ management:
         include: health,info
   endpoint:
     health:
-      show-details: always
+      # Don't leak component/dependency detail to unauthenticated callers (there is no
+      # Spring Security filter chain here, so this effectively hides details at the edge).
+      show-details: when-authorized
 
 logging:
+  # Tag every log line with the per-request correlation id (CorrelationIdFilter, MDC
+  # key 'correlationId'), forwarded to core-engine so a trace spans the gateway hop.
+  pattern:
+    level: "%5p [cid:%X{correlationId:--}]"
   level:
     root: INFO
     com.luke: DEBUG
+    # Dedicated audit trail (#24): privileged/auth events on the 'luke.audit' logger.
+    # Keep at INFO so the trail is always emitted; filter the log store by this name.
+    luke.audit: INFO

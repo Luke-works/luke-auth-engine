@@ -1,5 +1,6 @@
 package com.luke.auth.web;
 
+import com.luke.auth.audit.AuditService;
 import com.luke.auth.config.GatewayKeys;
 import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
@@ -24,7 +25,6 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.CookieValue;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -74,6 +74,7 @@ public class AuthController {
     private final SessionService sessionService;
     private final GatewayKeys gatewayKeys;
     private final CoreAdminClient coreAdmin;
+    private final AuditService auditService;
 
     private final String uiCallbackUrl;
     private final boolean cookieSecure;
@@ -86,6 +87,7 @@ public class AuthController {
                           SessionService sessionService,
                           GatewayKeys gatewayKeys,
                           CoreAdminClient coreAdmin,
+                          AuditService auditService,
                           @Value("${luke.auth.workos.ui-callback-url:http://localhost:5173/sso-callback}") String uiCallbackUrl,
                           @Value("${luke.auth.workos.cookie-secure:true}") boolean cookieSecure,
                           @Value("${luke.auth.workos.cookie-same-site:Lax}") String cookieSameSite) {
@@ -96,6 +98,7 @@ public class AuthController {
         this.sessionService = sessionService;
         this.gatewayKeys = gatewayKeys;
         this.coreAdmin = coreAdmin;
+        this.auditService = auditService;
         this.uiCallbackUrl = uiCallbackUrl;
         this.cookieSecure = cookieSecure;
         this.cookieSameSite = cookieSameSite;
@@ -111,7 +114,7 @@ public class AuthController {
     // ── Register ────────────────────────────────────────────────────────────
 
     @PostMapping("/register")
-    public ResponseEntity<?> register(@RequestBody RegisterRequest req) {
+    public ResponseEntity<?> register(@RequestBody RegisterRequest req, HttpServletRequest request) {
         if (isBlank(req.email()) || isBlank(req.password())) {
             return error(HttpStatus.BAD_REQUEST, "Bad Request", "email and password are required");
         }
@@ -125,9 +128,17 @@ public class AuthController {
             try {
                 onboarding.provision(engineUserId, req.firstName(), req.lastName(), req.email());
             } catch (OnboardingClient.OnboardingException e) {
-                // The identity exists in WorkOS but engine provisioning failed.
-                // Surface it rather than silently leaving a half-onboarded user.
-                log.error("Provisioning failed after WorkOS user creation for {}", engineUserId, e);
+                // Provisioning failed AFTER the WorkOS user was created. Roll the WorkOS
+                // user back so we don't leave an orphan that blocks retry (the email would
+                // otherwise stay taken). Best-effort cleanup; log if it fails.
+                log.error("Provisioning failed after WorkOS user creation for {} — rolling back WorkOS user {}",
+                        engineUserId, workosUserId, e);
+                try {
+                    workos.deleteUser(workosUserId);
+                } catch (Exception cleanup) {
+                    log.error("Rollback of orphaned WorkOS user {} failed; manual cleanup may be needed",
+                            workosUserId, cleanup);
+                }
                 return error(HttpStatus.BAD_GATEWAY, "Provisioning failed", e.getMessage());
             }
 
@@ -136,8 +147,10 @@ public class AuthController {
             body.put("workosUserId", workosUserId);
             body.put("user", userView(user));
             body.put("verifyRequired", !Boolean.TRUE.equals(user.get("email_verified")));
+            auditService.record("auth.register", AuditService.SUCCESS, engineUserId, req.email(), null, request);
             return ResponseEntity.status(HttpStatus.CREATED).body(body);
         } catch (WorkosClient.WorkosException e) {
+            auditService.record("auth.register", AuditService.FAILURE, "-", req.email(), null, request);
             return error(HttpStatus.valueOf(normalize(e.status())), "Registration failed", e.getMessage());
         }
     }
@@ -152,9 +165,15 @@ public class AuthController {
         }
         try {
             Map<String, Object> auth = workos.authenticateWithPassword(req.email(), req.password());
-            return sessionResponse(auth, request.getHeader("X-Tenant-Id"), response);
+            ResponseEntity<?> resp = sessionResponse(auth, request.getHeader("X-Tenant-Id"), response);
+            String outcome = resp.getStatusCode().is2xxSuccessful() ? AuditService.SUCCESS : AuditService.FAILURE;
+            auditService.record("auth.login", outcome, req.email(), req.email(),
+                    request.getHeader("X-Tenant-Id"), request);
+            return resp;
         } catch (WorkosClient.WorkosException e) {
             // e.g. invalid credentials, or email_verification_required.
+            auditService.record("auth.login", AuditService.FAILURE, "-", req.email(),
+                    request.getHeader("X-Tenant-Id"), request);
             return error(HttpStatus.valueOf(normalize(e.status())), "Login failed", e.getMessage());
         }
     }
@@ -163,31 +182,45 @@ public class AuthController {
 
     @GetMapping("/social")
     public ResponseEntity<?> social(@RequestParam String provider,
-                                    @RequestParam(required = false) String state) {
+                                    @RequestParam(required = false) String state,
+                                    HttpServletResponse response) {
         String workosProvider = PROVIDERS.getOrDefault(provider.toLowerCase(), provider);
-        String url = workos.authorizationUrl(workosProvider, state);
+        // CSRF: bind this authorization request to the browser. Generate a random
+        // state nonce, store it in a short-lived HttpOnly cookie, and pass it to
+        // WorkOS; /callback rejects any response whose state doesn't match. (A
+        // client-supplied state is ignored — it can't be trusted as a CSRF token.)
+        String nonce = newStateNonce();
+        response.addHeader(HttpHeaders.SET_COOKIE, stateCookie(nonce, 600));
+        String url = workos.authorizationUrl(workosProvider, nonce);
         return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(url)).build();
     }
 
     @GetMapping("/callback")
     public ResponseEntity<?> callback(@RequestParam(required = false) String code,
+                                      @RequestParam(required = false) String state,
                                       @RequestParam(required = false) String error,
+                                      @CookieValue(value = STATE_COOKIE, required = false) String stateCookieValue,
                                       HttpServletResponse response) {
+        // One-time use: always clear the state cookie on the way out.
+        response.addHeader(HttpHeaders.SET_COOKIE, stateCookie("", 0));
         if (error != null || code == null) {
             String to = uiCallbackUrl + "#error=" + (error == null ? "missing_code" : error);
             return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(to)).build();
         }
+        // CSRF: the state echoed back by WorkOS must match the cookie set in /social.
+        if (isBlank(state) || isBlank(stateCookieValue) || !constantTimeEquals(state, stateCookieValue)) {
+            log.warn("Social callback rejected: OAuth state mismatch");
+            return ResponseEntity.status(HttpStatus.FOUND)
+                    .location(URI.create(uiCallbackUrl + "#error=invalid_state")).build();
+        }
         try {
             Map<String, Object> auth = workos.authenticateWithCode(code);
-            String accessToken = String.valueOf(auth.get("access_token"));
+            // Establish the session via the HttpOnly refresh cookie ONLY. We do NOT
+            // put the access token (or sid) in the redirect URL: bearer tokens in URLs
+            // leak via browser history, Referer, proxies, and logs (OWASP). The SPA
+            // completes the session from the refresh cookie via /auth/refresh.
             setRefreshCookie(response, str(auth.get("refresh_token")));
-
-            Jwt jwt = verifier.verify(accessToken);
-            String sid = jwt.getClaimAsString("sid");
-            // Hand the SPA its access token via the URL fragment (kept out of
-            // server logs / Referer); the UI then calls /session as usual.
-            String to = uiCallbackUrl + "#access_token=" + accessToken + (sid != null ? "&sid=" + sid : "");
-            return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(to)).build();
+            return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(uiCallbackUrl)).build();
         } catch (Exception e) {
             log.warn("Social callback failed: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.FOUND)
@@ -205,9 +238,14 @@ public class AuthController {
         }
         try {
             Map<String, Object> auth = workos.authenticateWithRefreshToken(refreshToken);
-            return sessionResponse(auth, request.getHeader("X-Tenant-Id"), response);
+            ResponseEntity<?> resp = sessionResponse(auth, request.getHeader("X-Tenant-Id"), response);
+            auditService.record("auth.refresh",
+                    resp.getStatusCode().is2xxSuccessful() ? AuditService.SUCCESS : AuditService.FAILURE,
+                    "-", request);
+            return resp;
         } catch (WorkosClient.WorkosException e) {
             clearRefreshCookie(response);
+            auditService.record("auth.refresh", AuditService.FAILURE, "-", request);
             return error(HttpStatus.UNAUTHORIZED, "Unauthorized", "Could not refresh session");
         }
     }
@@ -217,14 +255,29 @@ public class AuthController {
     @PostMapping("/logout")
     public ResponseEntity<?> logout(HttpServletRequest request, HttpServletResponse response) {
         clearRefreshCookie(response);
-        // Best-effort: end the WorkOS session too, if the caller passed its token.
+        // End the session server-side, not just in the browser: drop the gateway's
+        // cached authorization view for this user and revoke the WorkOS session.
+        // (The access token itself stays valid until it expires — act-as tokens for
+        // gateway.ttl-seconds, the WorkOS token until its own short expiry — that brief
+        // residual window is the trade-off of stateless JWT verification.)
         String header = request.getHeader(HttpHeaders.AUTHORIZATION);
         String logoutUrl = null;
         if (header != null && header.regionMatches(true, 0, "Bearer ", 0, 7)) {
             try {
                 Jwt jwt = verifier.verify(header.substring(7).trim());
+                String engineUserId = identityResolver.toEngineUserId(jwt.getSubject());
+                sessionService.invalidate(engineUserId);
+                auditService.record("auth.logout", AuditService.SUCCESS, engineUserId, request);
                 String sid = jwt.getClaimAsString("sid");
-                if (sid != null) logoutUrl = workos.logoutUrl(sid);
+                if (sid != null) {
+                    logoutUrl = workos.logoutUrl(sid);
+                    try {
+                        workos.revokeSession(sid); // server-side revoke, best-effort
+                    } catch (Exception revokeFailed) {
+                        log.warn("WorkOS server-side session revoke failed (logout still proceeds): {}",
+                                revokeFailed.getMessage());
+                    }
+                }
             } catch (Exception ignored) {
                 // already expired / invalid — cookie is cleared, nothing more to do
             }
@@ -247,6 +300,7 @@ public class AuthController {
         if (fields.isEmpty()) return error(HttpStatus.BAD_REQUEST, "Bad Request", "Nothing to update");
         try {
             Map<String, Object> updated = workos.updateUser(userId, fields);
+            auditService.record("auth.profile_change", AuditService.SUCCESS, userId, request);
             return ResponseEntity.ok(Map.of("user", userView(updated)));
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Update failed", e.getMessage());
@@ -262,14 +316,21 @@ public class AuthController {
             // Verify the current password by re-authenticating (needs the user's email).
             String email = str(workos.getUser(userId).get("email"));
             if (email == null) return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", "Could not resolve user");
-            if (!isBlank(req.currentPassword())) {
-                try {
-                    workos.authenticateWithPassword(email, req.currentPassword());
-                } catch (WorkosClient.WorkosException e) {
-                    return error(HttpStatus.FORBIDDEN, "Forbidden", "Current password is incorrect");
-                }
+            // Always require and verify the current password — a password change
+            // for an authenticated session must prove knowledge of the existing
+            // password (otherwise a stolen/short-lived access token is enough to
+            // take the account over).
+            if (isBlank(req.currentPassword())) {
+                return error(HttpStatus.BAD_REQUEST, "Bad Request", "currentPassword is required");
+            }
+            try {
+                workos.authenticateWithPassword(email, req.currentPassword());
+            } catch (WorkosClient.WorkosException e) {
+                auditService.record("auth.password_change", AuditService.DENIED, userId, request);
+                return error(HttpStatus.FORBIDDEN, "Forbidden", "Current password is incorrect");
             }
             workos.updateUser(userId, Map.of("password", req.newPassword()));
+            auditService.record("auth.password_change", AuditService.SUCCESS, userId, request);
             return ResponseEntity.ok(Map.of("ok", true));
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Password change failed", e.getMessage());
@@ -301,7 +362,11 @@ public class AuthController {
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Delete failed", e.getMessage());
         }
+        // 3. Drop the gateway's cached authorization view so the deleted user's
+        //    session can't be honored from cache until the TTL lapses.
+        sessionService.invalidate(engineUserId);
         clearRefreshCookie(response);
+        auditService.record("auth.account_delete", AuditService.SUCCESS, engineUserId, request);
         return ResponseEntity.ok(Map.of("ok", true));
     }
 
@@ -315,6 +380,8 @@ public class AuthController {
         if (isBlank(req.email())) return error(HttpStatus.BAD_REQUEST, "Bad Request", "email is required");
         try {
             Map<String, Object> inv = workos.sendInvitation(req.email().trim(), caller.workosUserId);
+            auditService.record("org.invite", AuditService.SUCCESS, caller.engineUserId,
+                    req.email().trim(), caller.tenant, request);
             return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("ok", true, "invitation", invitationView(inv)));
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Invite failed", e.getMessage());
@@ -349,6 +416,8 @@ public class AuthController {
         if (caller.error != null) return caller.error;
         try {
             workos.revokeInvitation(id);
+            auditService.record("org.invite_revoke", AuditService.SUCCESS, caller.engineUserId,
+                    id, caller.tenant, request);
             return ResponseEntity.ok(Map.of("ok", true));
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Revoke failed", e.getMessage());
@@ -361,15 +430,27 @@ public class AuthController {
         if (caller.error != null) return caller.error;
         if (isBlank(req.email())) return error(HttpStatus.BAD_REQUEST, "Bad Request", "email is required");
 
+        String email = req.email().trim();
         Map<String, Object> invitee;
         try {
-            invitee = workos.findUserByEmail(req.email().trim());
+            invitee = workos.findUserByEmail(email);
         } catch (WorkosClient.WorkosException e) {
             return error(HttpStatus.valueOf(normalize(e.status())), "Lookup failed", e.getMessage());
         }
+
+        // #31: do NOT reveal whether the email is a known platform user (the old 404 vs
+        // success was an enumeration oracle for any tenant-admin). A non-user is INVITED
+        // (consent flow); an existing user is added via core-engine, which authorizes the
+        // admin against the target tenant. BOTH return the same uniform 200.
         if (invitee == null) {
-            return error(HttpStatus.NOT_FOUND, "Not Found",
-                    "No user with that email yet. Send them an invite first.");
+            try {
+                workos.sendInvitation(email, caller.workosUserId);
+            } catch (WorkosClient.WorkosException ignored) {
+                // already invited / WorkOS hiccup — stay uniform, don't leak the reason
+            }
+            auditService.record("org.member_add_invited", AuditService.SUCCESS, caller.engineUserId,
+                    email, caller.tenant, request);
+            return ResponseEntity.ok(Map.of("ok", true));
         }
 
         Map<String, Object> body = new LinkedHashMap<>();
@@ -380,15 +461,14 @@ public class AuthController {
         body.put("role", isBlank(req.role()) ? "tenant-user" : req.role());
         body.put("accessLevel", req.accessLevel());
 
-        CoreAdminClient.CoreResponse core;
         try {
-            core = coreAdmin.createOrgUser(mintActAs(caller.engineUserId), caller.tenant, body);
+            coreAdmin.createOrgUser(mintActAs(caller.engineUserId), caller.tenant, body);
         } catch (CoreAdminClient.CoreException e) {
             return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", e.getMessage());
         }
-        return ResponseEntity.status(core.status())
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(core.body().length == 0 ? new byte[0] : core.body());
+        auditService.record("org.member_add", AuditService.SUCCESS, caller.engineUserId,
+                str(body.get("id")), caller.tenant, request);
+        return ResponseEntity.ok(Map.of("ok", true));
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -508,6 +588,39 @@ public class AuthController {
                 .append("; SameSite=").append(cookieSameSite);
         if (cookieSecure) sb.append("; Secure");
         return sb.toString();
+    }
+
+    // ── OAuth state (CSRF protection for the social/SSO redirect) ─────────────
+
+    private static final String STATE_COOKIE = "luke_oauth_state";
+    private static final java.security.SecureRandom STATE_RANDOM = new java.security.SecureRandom();
+
+    /** A 256-bit URL-safe random nonce used as the OAuth {@code state}. */
+    private static String newStateNonce() {
+        byte[] b = new byte[32];
+        STATE_RANDOM.nextBytes(b);
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(b);
+    }
+
+    /**
+     * The state cookie. {@code SameSite=Lax} (forced, not the configurable value
+     * used for the refresh cookie) so it is sent on the top-level GET redirect
+     * back from WorkOS to {@code /auth/callback}.
+     */
+    private String stateCookie(String value, long maxAgeSeconds) {
+        StringBuilder sb = new StringBuilder(STATE_COOKIE).append('=').append(value)
+                .append("; Path=/auth")
+                .append("; HttpOnly")
+                .append("; Max-Age=").append(maxAgeSeconds)
+                .append("; SameSite=Lax");
+        if (cookieSecure) sb.append("; Secure");
+        return sb.toString();
+    }
+
+    private static boolean constantTimeEquals(String a, String b) {
+        return java.security.MessageDigest.isEqual(
+                a.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                b.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     private static boolean isBlank(String s) { return s == null || s.isBlank(); }

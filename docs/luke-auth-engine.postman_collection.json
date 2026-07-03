@@ -1,0 +1,338 @@
+{
+  "info": {
+    "_postman_id": "b2e7c9a4-1f3d-4a5e-9c8b-luke-auth-0001",
+    "name": "luke-auth-engine",
+    "description": "Consumer-facing auth gateway for the Luke platform.\n\nIt authenticates the caller via a **WorkOS** access token, resolves the WorkOS subject to an engine userId (`workos:<sub>` style), mints a short-lived signed *act-as-user* token (RS256), and transparently proxies the request to `luke-core-engine` (and reads `luke-capability-engine` for the `/session` view).\n\n## Flow\n```\nconsumer-ui --WorkOS access token--> luke-auth-engine --act-as-user JWT--> luke-core-engine\n```\n\n## Getting started\n1. Set the `baseUrl` collection variable (default `http://localhost:8083`).\n2. Run **Auth > Login** (or **Register** then Login). The login/refresh requests have test scripts that automatically store `accessToken` and `sid` into collection variables.\n3. Subsequent requests (Session, Engine proxy) use `{{accessToken}}` as the Bearer automatically.\n\n## Dev mode\nWhen the service runs with `LUKE_AUTH_DEV_MODE=true`, `GET /dev/token?user=` mints an act-as token directly and `GET /session` / the proxy accept an `X-Dev-User` header instead of a WorkOS Bearer. Never enable in shared/prod environments.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8083", "type": "string" },
+    { "key": "accessToken", "value": "", "type": "string" },
+    { "key": "sid", "value": "", "type": "string" },
+    { "key": "tenantId", "value": "", "type": "string" },
+    { "key": "email", "value": "test.user@example.com", "type": "string" },
+    { "key": "password", "value": "Sup3rSecret!", "type": "string" },
+    { "key": "serviceKey", "value": "", "type": "string" },
+    { "key": "devUser", "value": "workos:dev-user", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "description": "The consumer front door. luke-auth — not the browser — owns the conversation with WorkOS.",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/register",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "register"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\",\n  \"firstName\": \"Test\",\n  \"lastName\": \"User\"\n}"
+            },
+            "description": "Create the WorkOS identity (and optionally provision into core-engine).\n\n**Body**: `email`, `password`, `firstName`, `lastName` (email + password required).\n\n**201** → `{ userId, workosUserId, verifyRequired }`.\n**400** if email/password missing; **502** if engine provisioning fails."
+          },
+          "response": []
+        },
+        {
+          "name": "Login (email/password)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const json = pm.response.json();",
+                  "    if (json.accessToken) {",
+                  "        pm.collectionVariables.set('accessToken', json.accessToken);",
+                  "        console.log('Stored accessToken');",
+                  "    }",
+                  "    if (json.sid) {",
+                  "        pm.collectionVariables.set('sid', json.sid);",
+                  "    }",
+                  "    pm.test('200 with accessToken', function () {",
+                  "        pm.expect(json.accessToken).to.be.a('string').and.not.empty;",
+                  "    });",
+                  "} else {",
+                  "    console.log('Login failed:', pm.response.code, pm.response.text());",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Tenant-Id", "value": "{{tenantId}}", "description": "Optional — active tenant/org for the session view.", "disabled": true }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "description": "Email/password login against WorkOS.\n\n**200** → `{ accessToken, sid, session }`. The refresh token is set as the `wos_refresh` HttpOnly cookie (used by `/auth/refresh`).\n\nThe optional `X-Tenant-Id` header selects the active tenant for the embedded session view.\n\nThe test script stores `accessToken` and `sid` into collection variables on success."
+          },
+          "response": []
+        },
+        {
+          "name": "Social / SSO (redirect)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/auth/social?provider=google&state=",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "social"],
+              "query": [
+                { "key": "provider", "value": "google", "description": "google | microsoft | github | apple | authkit (or a raw WorkOS provider value)." },
+                { "key": "state", "value": "", "description": "Optional opaque state echoed back to the callback." }
+              ]
+            },
+            "description": "**302** redirect to WorkOS for social/SSO login. Open in a browser — the browser is sent to WorkOS and then back to `/auth/callback`. Postman will follow the redirect; disable redirect-following to inspect the `Location` header."
+          },
+          "response": []
+        },
+        {
+          "name": "Callback (finish SSO)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/auth/callback?code=AUTH_CODE_FROM_WORKOS",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "callback"],
+              "query": [
+                { "key": "code", "value": "AUTH_CODE_FROM_WORKOS", "description": "Authorization code WorkOS appends when redirecting back." },
+                { "key": "error", "value": "", "description": "Set by WorkOS instead of code on failure.", "disabled": true }
+              ]
+            },
+            "description": "Finishes the social/SSO redirect. WorkOS calls this with `?code=...`; the gateway exchanges it, sets the `wos_refresh` cookie, and **302**-redirects the browser to the UI callback URL with `#access_token=...&sid=...` in the fragment.\n\nNormally hit by the browser, not Postman — included for reference."
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const json = pm.response.json();",
+                  "    if (json.accessToken) {",
+                  "        pm.collectionVariables.set('accessToken', json.accessToken);",
+                  "        console.log('Rotated accessToken');",
+                  "    }",
+                  "    if (json.sid) {",
+                  "        pm.collectionVariables.set('sid', json.sid);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Tenant-Id", "value": "{{tenantId}}", "description": "Optional — active tenant for the refreshed session view.", "disabled": true }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/refresh",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "refresh"]
+            },
+            "description": "Rotate the access token from the `wos_refresh` HttpOnly cookie (set by login/callback). Postman sends the cookie automatically if it was captured on the same `baseUrl`.\n\n**200** → `{ accessToken, sid, session }`; **401** if the cookie is missing/expired (the cookie is then cleared).\n\nThe test script refreshes the stored `accessToken`/`sid`."
+          },
+          "response": []
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}", "description": "Optional — if present, the matching WorkOS session is also ended." }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/logout",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "logout"]
+            },
+            "description": "Clears the `wos_refresh` cookie. If a valid Bearer is supplied, also returns `workosLogoutUrl` to end the WorkOS session.\n\n**200** → `{ ok: true, workosLogoutUrl? }`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Session",
+      "item": [
+        {
+          "name": "Get session",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "X-Tenant-Id", "value": "{{tenantId}}", "description": "Optional — active tenant/org; validated against the user's memberships.", "disabled": true },
+              { "key": "X-Dev-User", "value": "{{devUser}}", "description": "Dev-mode only: literal engine userId, stands in for a WorkOS Bearer.", "disabled": true }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/session",
+              "host": ["{{baseUrl}}"],
+              "path": ["session"]
+            },
+            "description": "Who the user is and what they can do. Verifies the WorkOS access token, derives the engine userId, and merges the core-engine (Camunda) + capability-engine views.\n\n**200** → `{ userId, provisioned, operator, tenantAdmin, tenant, tenants[], roles{}, candidateGroups[], capabilities{}, can[] }`.\n**401** if the Bearer is missing/invalid; **403** if `X-Tenant-Id` is a tenant the user doesn't belong to.\n\nA not-yet-onboarded user returns `provisioned:false` with empty roles/tenants (still 200)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Service accounts",
+      "item": [
+        {
+          "name": "Mint service token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const json = pm.response.json();",
+                  "    if (json.token) {",
+                  "        pm.collectionVariables.set('accessToken', json.token);",
+                  "        console.log('Stored service token as accessToken for downstream calls');",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Service-Key", "value": "{{serviceKey}}", "description": "A configured service key (LUKE_AUTH_SERVICE_KEYS=key=userId)." }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/service/token",
+              "host": ["{{baseUrl}}"],
+              "path": ["service", "token"]
+            },
+            "description": "Robot equivalent of login. With a valid `X-Service-Key`, mints a short-lived act-as token for the key's service userId.\n\n**200** → `{ token, tokenType: \"Bearer\", expiresIn, subject }`; **401** for unknown/missing key.\n\nThe test script stores the minted token into `accessToken` so you can drive the Engine proxy as the service account."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Dev tools",
+      "description": "Available only when the service runs with luke.auth.dev-mode=true. Return 404 otherwise.",
+      "item": [
+        {
+          "name": "Mint dev token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const json = pm.response.json();",
+                  "    if (json.token) {",
+                  "        pm.collectionVariables.set('accessToken', json.token);",
+                  "        console.log('Stored dev token as accessToken');",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/dev/token?user={{devUser}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["dev", "token"],
+              "query": [
+                { "key": "user", "value": "{{devUser}}", "description": "Literal engine userId to mint an act-as token for." }
+              ]
+            },
+            "description": "Dev-only: mints an act-as token for a given engine userId so downstream resource servers can be exercised locally without a real login.\n\n**200** → `{ token }` (only when `luke.auth.dev-mode=true`); **404** otherwise.\n\nNEVER enable dev-mode in shared/prod — it hands out act-as-anyone tokens."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Infra / well-known",
+      "item": [
+        {
+          "name": "JWKS (public signing keys)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/.well-known/jwks.json",
+              "host": ["{{baseUrl}}"],
+              "path": [".well-known", "jwks.json"]
+            },
+            "description": "Publishes the gateway's public signing key as a JWK Set. `luke-core-engine` fetches this to verify the act-as-user tokens. Intentionally unauthenticated; only the public half of the keypair is exposed."
+          },
+          "response": []
+        },
+        {
+          "name": "Health (actuator)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "health"]
+            },
+            "description": "Spring Boot actuator health check (used by Render)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Engine proxy",
+      "description": "Catch-all reverse proxy: any path not claimed by a specific mapping above is forwarded to luke-core-engine, swapping the WorkOS Bearer for a minted act-as-user token. Method, path, query, body, and X-Tenant-Id are forwarded unchanged.",
+      "item": [
+        {
+          "name": "Proxy (example GET)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "X-Tenant-Id", "value": "{{tenantId}}", "description": "Optional — forwarded to the engine unchanged.", "disabled": true },
+              { "key": "X-Dev-User", "value": "{{devUser}}", "description": "Dev-mode only: stands in for a WorkOS Bearer.", "disabled": true }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/engine/some/path",
+              "host": ["{{baseUrl}}"],
+              "path": ["engine", "some", "path"]
+            },
+            "description": "Replace the path with any luke-core-engine API path. The gateway authenticates you (WorkOS Bearer or, in dev mode, `X-Dev-User`), mints an act-as-user token, and forwards the request to the engine transparently.\n\n**401** if authentication fails; **502** if the engine is unreachable; otherwise relays the engine's status, headers, and body."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

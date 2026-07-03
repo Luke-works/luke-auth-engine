@@ -1,0 +1,9 @@
+# Default reviewer for everything (enforced once branch protection requires CODEOWNERS).
+* @lukeadministrator
+
+# Security-sensitive surfaces warrant extra care.
+/src/main/java/com/luke/auth/security/   @lukeadministrator
+/src/main/java/com/luke/auth/web/        @lukeadministrator
+/src/main/resources/application.yml      @lukeadministrator
+/.github/                                @lukeadministrator
+/pom.xml                                 @lukeadministrator

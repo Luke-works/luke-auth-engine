@@ -134,7 +134,9 @@ management:
         include: health,info
   endpoint:
     health:
-      show-details: always
+      # Don't leak component/dependency detail to unauthenticated callers (there is no
+      # Spring Security filter chain here, so this effectively hides details at the edge).
+      show-details: when-authorized
 
 logging:
   # Tag every log line with the per-request correlation id (CorrelationIdFilter, MDC

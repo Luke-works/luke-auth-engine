@@ -1,10 +1,13 @@
 package com.luke.auth.audit;
 
 import com.luke.auth.config.CorrelationIdFilter;
+import com.luke.auth.web.ClientIp;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -32,6 +35,20 @@ public class AuditService {
     public static final String FAILURE = "failure";
     public static final String DENIED = "denied";
 
+    /** Same trusted-proxy-hop count the rate-limit filter uses, so a spoofed X-Forwarded-For
+     *  can't poison the audit-log source IP either. */
+    private final int trustedProxyHops;
+
+    @Autowired
+    public AuditService(@Value("${luke.auth.ratelimit.trusted-proxy-hops:0}") int trustedProxyHops) {
+        this.trustedProxyHops = Math.max(0, trustedProxyHops);
+    }
+
+    /** Test/legacy convenience: no trusted proxies (leftmost-XFF, single-hop). */
+    public AuditService() {
+        this(0);
+    }
+
     /**
      * Record one audit event.
      *
@@ -44,7 +61,7 @@ public class AuditService {
      */
     public void record(String action, String outcome, String actor, String target,
                        String tenant, HttpServletRequest request) {
-        String ip = request != null ? clientIp(request) : "-";
+        String ip = request != null ? ClientIp.resolve(request, trustedProxyHops) : "-";
         String cid = MDC.get(CorrelationIdFilter.MDC_KEY);
         // SLF4J placeholders keep this allocation-light; values here never contain spaces.
         audit.info("action={} outcome={} actor={} target={} tenant={} ip={} cid={}",
@@ -54,16 +71,6 @@ public class AuditService {
     /** Convenience for self-acting events with no distinct target/tenant. */
     public void record(String action, String outcome, String actor, HttpServletRequest request) {
         record(action, outcome, actor, null, null, request);
-    }
-
-    /** Source IP: first X-Forwarded-For hop (Render sets it), else the socket address. */
-    static String clientIp(HttpServletRequest req) {
-        String xff = req.getHeader("X-Forwarded-For");
-        if (xff != null && !xff.isBlank()) {
-            int comma = xff.indexOf(',');
-            return (comma > 0 ? xff.substring(0, comma) : xff).trim();
-        }
-        return req.getRemoteAddr();
     }
 
     private static String nz(String s) {

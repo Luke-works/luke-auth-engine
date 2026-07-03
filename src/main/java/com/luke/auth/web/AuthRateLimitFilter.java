@@ -66,20 +66,7 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
         chain.doFilter(req, res);
     }
 
-    /** Resolve the client IP from X-Forwarded-For, counting {@code trustedProxyHops}
-     *  entries from the RIGHT (the trustworthy end appended by our own proxies) rather
-     *  than the spoofable leftmost hop. Falls back to the remote address. */
     private String clientIp(HttpServletRequest req) {
-        String xff = req.getHeader("X-Forwarded-For");
-        if (xff != null && !xff.isBlank()) {
-            String[] hops = xff.split(",");
-            if (trustedProxyHops <= 0) {
-                return hops[0].trim(); // legacy: leftmost (dev/single-hop)
-            }
-            // N trusted proxies → the client is the Nth from the right, clamped in-bounds.
-            int idx = Math.max(0, hops.length - trustedProxyHops);
-            return hops[Math.min(idx, hops.length - 1)].trim();
-        }
-        return req.getRemoteAddr();
+        return ClientIp.resolve(req, trustedProxyHops);
     }
 }

@@ -29,10 +29,10 @@ jobs:
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # `--config auto` selects rulesets from the languages present (Java/Python/JS/TS/…).
       - run: semgrep scan --config auto --sarif --output semgrep.sarif || true
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@v4
         continue-on-error: true
         with:
           sarif_file: semgrep.sarif
@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so a secret in any past commit is caught
       # Run the CLI image directly (the marketplace action needs a paid org licence).
@@ -51,7 +51,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:latest \
             detect --source=/repo --redact -v --report-format sarif --report-path /repo/gitleaks.sarif || true
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@v4
         continue-on-error: true
         with:
           sarif_file: gitleaks.sarif
@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Trivy filesystem scan
         continue-on-error: true
         # Run the official image directly (the marketplace action's pinned version was unresolvable).
@@ -70,7 +70,7 @@ jobs:
           docker run --rm -v "$PWD:/repo" aquasec/trivy:latest fs /repo \
             --scanners vuln,secret,misconfig --severity HIGH,CRITICAL \
             --format sarif --output /repo/trivy.sarif || true
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@v4
         continue-on-error: true
         with:
           sarif_file: trivy.sarif

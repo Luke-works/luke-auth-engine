@@ -7,8 +7,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -29,23 +34,81 @@ import org.springframework.stereotype.Component;
  *       after that time with NO redeploy (issue short-lived keys; they self-revoke).</li>
  *   <li><b>Scope metadata</b> — {@code ;scope=<csv>} is carried for least-privilege +
  *       audit (recorded on issuance; downstream act-as scoping is a follow-up).</li>
+ *   <li><b>Live revocation</b> — a keyId can be added to an in-memory revocation set at
+ *       runtime ({@link #revoke}) and is rejected by {@link #resolve} immediately, with
+ *       NO restart or redeploy. The set is exposed via an operator-only endpoint on
+ *       {@code ServiceTokenController}. (Persist across restarts by re-issuing the env /
+ *       secret with an {@code exp} in the past, or by re-driving the endpoint on boot.)</li>
+ *   <li><b>Usage metering / audit</b> — each key tracks a last-used epoch-second timestamp
+ *       and a monotonic issuance counter ({@link #Usage}), maintained thread-safe. The
+ *       issuing controller records these into the audit trail on every successful mint.</li>
  * </ul>
  * Comparison is constant-time per entry.
+ *
+ * <h2>Pluggable secret source (#39: "sourced from a secret manager")</h2>
+ * <p>Key material is read through a {@link SecretSource} rather than being hard-wired to
+ * the {@code luke.auth.service.keys} env var. The default {@code SecretSource} is the
+ * config string, but a deployment that wants keys from AWS Secrets Manager / Vault / GCP
+ * Secret Manager can supply a bean of type {@link SecretSource} whose {@link SecretSource#raw()}
+ * fetches the same {@code <secret>=<userId>;...} line from that store — no other code
+ * changes. That is the only part of the "secret manager" AC that needs external infra;
+ * the registry itself is decoupled from where the material lives.
  */
 @Component
 public class ServiceKeyRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(ServiceKeyRegistry.class);
 
+    /**
+     * Where the raw {@code <secret>=<userId>;...} key material comes from. The default is
+     * the {@code luke.auth.service.keys} config value; a secret-manager-backed bean can
+     * replace it without touching the registry. Kept a functional interface so a lambda
+     * (e.g. {@code () -> secretsManager.getSecretValue("luke/service-keys")}) suffices.
+     */
+    @FunctionalInterface
+    public interface SecretSource extends Supplier<String> {
+        /** The raw comma-separated key material, or blank/null if none configured. */
+        String raw();
+
+        @Override
+        default String get() {
+            return raw();
+        }
+    }
+
     /** Result of a successful resolve: the identity plus non-secret metadata for audit. */
     public record Resolved(String userId, String keyId, String scope) {}
+
+    /** Per-key usage snapshot for metering/audit: last-used epoch second + issuance count. */
+    public record Usage(long lastUsedEpochSec, long issuanceCount) {}
 
     private record Entry(boolean hashed, byte[] secretOrHash, String userId, long expiryEpochSec,
                          String scope, String keyId) {}
 
     private final List<Entry> entries = new ArrayList<>();
 
+    /** Live revocation list — keyIds revoked at runtime take effect on the next resolve. */
+    private final Set<String> revokedKeyIds = ConcurrentHashMap.newKeySet();
+
+    /** Per-key last-used timestamp (epoch seconds), updated on each successful resolve. */
+    private final ConcurrentHashMap<String, AtomicLong> lastUsed = new ConcurrentHashMap<>();
+
+    /** Per-key monotonic issuance counter, incremented on each successful resolve. */
+    private final ConcurrentHashMap<String, AtomicLong> issuanceCount = new ConcurrentHashMap<>();
+
+    /** Spring-wired constructor: default {@link SecretSource} is the config value. */
+    @Autowired
     public ServiceKeyRegistry(@Value("${luke.auth.service.keys:}") String raw) {
+        this((SecretSource) () -> raw);
+    }
+
+    /**
+     * Core constructor taking a pluggable {@link SecretSource} — used directly by tests and
+     * by any secret-manager integration. The material is read ONCE at construction (like the
+     * env today); live changes flow through {@link #revoke}, not re-reads of the source.
+     */
+    public ServiceKeyRegistry(SecretSource source) {
+        String raw = source != null ? source.raw() : null;
         if (raw != null && !raw.isBlank()) {
             for (String pair : raw.split(",")) {
                 Entry e = parse(pair.trim());
@@ -100,7 +163,8 @@ public class ServiceKeyRegistry {
 
     /**
      * Resolve a presented key to its identity + metadata, or {@code null} if no entry
-     * matches or the matching entry has expired. Constant-time comparison per entry.
+     * matches, the matching entry has expired, or its keyId has been revoked live.
+     * Constant-time comparison per entry. On success, updates last-used + issuance count.
      */
     public Resolved resolve(String key) {
         if (key == null || key.isBlank()) return null;
@@ -115,12 +179,66 @@ public class ServiceKeyRegistry {
             }
         }
         if (match == null) return null;
+        if (revokedKeyIds.contains(match.keyId())) {
+            log.warn("ServiceKeyRegistry: rejected REVOKED service key (keyId={}, userId={})",
+                    match.keyId(), match.userId());
+            return null;
+        }
         if (match.expiryEpochSec() > 0 && now >= match.expiryEpochSec()) {
             log.warn("ServiceKeyRegistry: rejected EXPIRED service key (keyId={}, userId={})",
                     match.keyId(), match.userId());
             return null;
         }
+        // Success: meter it. Thread-safe; created lazily per keyId.
+        lastUsed.computeIfAbsent(match.keyId(), k -> new AtomicLong()).set(now);
+        issuanceCount.computeIfAbsent(match.keyId(), k -> new AtomicLong()).incrementAndGet();
         return new Resolved(match.userId(), match.keyId(), match.scope());
+    }
+
+    /**
+     * Revoke a keyId at runtime — takes effect on the very next {@link #resolve} with no
+     * restart. Idempotent. Returns {@code true} if the keyId is a known configured key (so
+     * the operator gets feedback for a typo'd keyId), {@code false} otherwise; either way the
+     * id is added to the revocation set (revoking an unknown id is harmless and future-proof
+     * if keys are rotated in from a secret source).
+     */
+    public boolean revoke(String keyId) {
+        if (keyId == null || keyId.isBlank()) return false;
+        String id = keyId.trim();
+        revokedKeyIds.add(id);
+        boolean known = entries.stream().anyMatch(e -> e.keyId().equals(id));
+        log.warn("ServiceKeyRegistry: keyId={} REVOKED live (known={})", id, known);
+        return known;
+    }
+
+    /** Un-revoke a keyId (operator undo). Returns whether it was in the revocation set. */
+    public boolean unrevoke(String keyId) {
+        if (keyId == null || keyId.isBlank()) return false;
+        boolean removed = revokedKeyIds.remove(keyId.trim());
+        if (removed) {
+            log.warn("ServiceKeyRegistry: keyId={} un-revoked", keyId.trim());
+        }
+        return removed;
+    }
+
+    /** Whether a keyId is currently revoked. */
+    public boolean isRevoked(String keyId) {
+        return keyId != null && revokedKeyIds.contains(keyId.trim());
+    }
+
+    /** Immutable snapshot of currently-revoked keyIds. */
+    public Set<String> revokedKeyIds() {
+        return Set.copyOf(revokedKeyIds);
+    }
+
+    /**
+     * Usage snapshot for a keyId: last-used epoch second (0 if never used) and issuance
+     * count (0 if never issued). Never {@code null}.
+     */
+    public Usage usage(String keyId) {
+        AtomicLong lu = lastUsed.get(keyId);
+        AtomicLong ic = issuanceCount.get(keyId);
+        return new Usage(lu != null ? lu.get() : 0L, ic != null ? ic.get() : 0L);
     }
 
     private static String sha256Hex(String s) {

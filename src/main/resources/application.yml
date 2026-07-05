@@ -52,8 +52,18 @@ luke:
     # X-Service-Key and gets an act-as token for its userId (which must be
     # provisioned in the engine like a human). e.g.
     #   LUKE_AUTH_SERVICE_KEYS=s3cret1=svc:order-bot,s3cret2=svc:billing
+    # Each key may be stored HASHED at rest (SHA-256 hex; echo -n <key> | sha256sum)
+    # and may carry ;exp=<epochSeconds> (self-revokes without redeploy) and ;scope=<csv>
+    # (least-privilege metadata, audited on issuance). e.g.
+    #   LUKE_AUTH_SERVICE_KEYS=<sha256hex>=svc:order-bot;exp=1893456000;scope=forms,emails
+    # Live revocation (#39): POST /service/keys/{keyId}/revoke with X-Operator-Token takes
+    # effect on the next /service/token with NO restart; set the operator-token to enable it
+    # (blank ⇒ the revoke endpoint is disabled). keyId is the non-secret 8-char label in the
+    # audit trail. Secret-manager sourcing: supply a ServiceKeyRegistry.SecretSource bean to
+    # read the key material from AWS Secrets Manager / Vault instead of this env var.
     service:
       keys: ${LUKE_AUTH_SERVICE_KEYS:}
+      operator-token: ${LUKE_AUTH_SERVICE_OPERATOR_TOKEN:}
 
     # ── WorkOS (authentication) ─────────────────────────────────────────────
     # luke-auth runs the login flows server-to-server against the WorkOS User

@@ -38,7 +38,25 @@ public class CorsConfig {
         config.setAllowCredentials(true);
         config.setMaxAge(3600L);
 
+        // Public embed/sign surface proxied to core-engine (/api/public/**) plus the embed
+        // page and its static bundle (/embed/**, /embed-assets/**). These are unauthenticated
+        // (token/HMAC-gated, no cookies) and designed to load from arbitrary third-party sites,
+        // so they must accept any origin — WITHOUT credentials. Mirrors core-engine's carve-out.
+        // The gateway is the CORS terminator now, so without this the strict allowlist below
+        // 403s the embed's own <script type="module"> bundle load (it sends an Origin header
+        // even same-origin). Registered before "/**" so it wins the path match. CORS is not an
+        // authz control here — the token/HMAC + rate limits are; opening it adds no exposure.
+        CorsConfiguration publicConfig = new CorsConfiguration();
+        publicConfig.setAllowedOriginPatterns(List.of("*"));
+        publicConfig.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
+        publicConfig.setAllowedHeaders(List.of("Content-Type", "Accept", "X-Tenant-Id"));
+        publicConfig.setAllowCredentials(false);
+        publicConfig.setMaxAge(3600L);
+
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/api/public/**", publicConfig);
+        source.registerCorsConfiguration("/embed-assets/**", publicConfig);
+        source.registerCorsConfiguration("/embed/**", publicConfig);
         source.registerCorsConfiguration("/**", config);
         return new CorsFilter(source);
     }

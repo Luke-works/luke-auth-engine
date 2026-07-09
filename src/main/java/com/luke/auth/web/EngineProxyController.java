@@ -161,10 +161,13 @@ public class EngineProxyController {
                 || canonicalPath.startsWith("/embed-assets/");
 
         // Route the byte tier (luke-file-proxy) when configured: the authenticated /api/documents/** AND
-        // the PUBLIC embed-upload surface /api/public/documents/** (token-authorized, no user). Everything
-        // else — and documents when the proxy URL is unset — goes to core-engine.
+        // the PUBLIC embed-upload surface /api/public/documents/** (token-authorized, no user), plus the
+        // EMAIL ASSET tier — authenticated upload /api/email-assets/** and the PUBLIC image-serve surface
+        // /api/public/email-assets/** (assetId-as-bearer, no user; loaded by a recipient's mail client).
+        // Everything else — and these when the proxy URL is unset — goes to core-engine.
         boolean toFileProxy = fileProxyBaseUrl != null
-                && (canonicalPath.startsWith("/api/documents") || canonicalPath.startsWith("/api/public/documents"));
+                && (canonicalPath.startsWith("/api/documents") || canonicalPath.startsWith("/api/public/documents")
+                    || canonicalPath.startsWith("/api/email-assets") || canonicalPath.startsWith("/api/public/email-assets"));
         String baseUrl = toFileProxy ? fileProxyBaseUrl : coreEngineBaseUrl;
 
         String actAsToken = null;

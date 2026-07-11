@@ -17,7 +17,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 /**
- * Provisions a freshly-registered user into core-engine (CIBSeven) by calling
+ * Provisions a freshly-registered user into core-engine (FluxNova) by calling
  * the operator-only {@code POST /api/admin/onboard-user} with a configured
  * operator Basic credential. The engine user id is supplied explicitly (the same
  * {@code workos:<sub>} string the gateway asserts at request time), so no
@@ -77,7 +77,7 @@ public class OnboardingClient {
         body.put("firstName", firstName == null ? "" : firstName);
         body.put("lastName", lastName == null ? "" : lastName);
         body.put("email", email);
-        body.put("password", randomUnusablePassword()); // CIBSeven needs a value; WorkOS owns auth
+        body.put("password", randomUnusablePassword()); // FluxNova needs a value; WorkOS owns auth
         body.put("tenantId", defaultTenant);
         body.put("role", defaultRole);
         body.put("accessLevel", defaultAccessLevel);
@@ -106,7 +106,7 @@ public class OnboardingClient {
         }
     }
 
-    /** Long random secret so the CIBSeven password field is satisfied but never matches. */
+    /** Long random secret so the FluxNova password field is satisfied but never matches. */
     private static String randomUnusablePassword() {
         byte[] bytes = new byte[48];
         new java.security.SecureRandom().nextBytes(bytes);

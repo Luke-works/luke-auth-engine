@@ -7,7 +7,7 @@ Consumer-facing **auth gateway** for the Luke platform. It sits between
 2. **Resolves** the Clerk subject to an engine userId (`clerk:<sub>`).
 3. **Mints** a short-lived, signed *act-as-user* token (RS256).
 4. **Proxies** the request transparently to `luke-core-engine`, which performs
-   **authorization** against that user's CIBSeven groups/tenants.
+   **authorization** against that user's FluxNova groups/tenants.
 
 The powerful act-as-user token never reaches the browser — the gateway is in
 the path for every request, so the only token the browser holds is its own

@@ -102,7 +102,10 @@ public class OnboardingClient {
         } catch (OnboardingException e) {
             throw e;
         } catch (Exception e) {
-            throw new OnboardingException("Onboarding call failed: " + e.getMessage());
+            // Cause can name internal hosts / TLS internals — log it, don't put it in the
+            // message, which callers relay to clients (#37).
+            log.error("Onboarding call failed for {}", engineUserId, e);
+            throw new OnboardingException("Onboarding call failed");
         }
     }
 

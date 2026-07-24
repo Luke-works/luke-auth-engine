@@ -2,11 +2,12 @@ package com.luke.auth.session;
 
 import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
+import com.luke.auth.web.error.ApiError;
 import jakarta.servlet.http.HttpServletRequest;
-import java.util.Map;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtException;
@@ -44,7 +45,8 @@ public class SessionController {
 
     @GetMapping("/session")
     public ResponseEntity<?> session(HttpServletRequest request,
-                                     @org.springframework.web.bind.annotation.RequestParam(value = "fresh", defaultValue = "false") boolean fresh) {
+                                     @org.springframework.web.bind.annotation.RequestParam(value = "fresh", defaultValue = "false") boolean fresh)
+            throws Exception {
         String engineUserId;
         try {
             engineUserId = authenticate(request);
@@ -56,17 +58,13 @@ public class SessionController {
         }
 
         String tenant = request.getHeader("X-Tenant-Id");
-        try {
-            // fresh=true bypasses the per-(user,tenant) cache — the UI sets it right
-            // after changing access so the change reflects without waiting out the TTL.
-            return ResponseEntity.ok(sessionService.session(engineUserId, tenant, fresh));
-        } catch (SessionService.TenantForbiddenException e) {
-            return error(HttpStatus.FORBIDDEN, "Forbidden", e.getMessage());
-        } catch (PermissionsClient.UpstreamException e) {
-            return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", e.getMessage());
-        } catch (Exception e) {
-            return error(HttpStatus.INTERNAL_SERVER_ERROR, "Internal Error", e.getMessage());
-        }
+        // fresh=true bypasses the per-(user,tenant) cache — the UI sets it right
+        // after changing access so the change reflects without waiting out the TTL.
+        //
+        // TenantForbidden → 403, UpstreamException → 502 and anything else → 500 are all
+        // mapped (and sanitized) by GlobalExceptionHandler, so there is no inline catch
+        // here to drift out of sync with the rest of the gateway (#37).
+        return ResponseEntity.ok(sessionService.session(engineUserId, tenant, fresh));
     }
 
     /** WorkOS Bearer → engine userId; or, in dev mode only, an X-Dev-User header. */
@@ -86,7 +84,7 @@ public class SessionController {
         return null;
     }
 
-    private ResponseEntity<Map<String, String>> error(HttpStatus status, String title, String message) {
-        return ResponseEntity.status(status).body(Map.of("error", title, "message", message));
+    private ResponseEntity<ProblemDetail> error(HttpStatus status, String title, String message) {
+        return ApiError.entity(status, title, message);
     }
 }

@@ -11,6 +11,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -33,6 +35,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class WorkosClient {
 
+    private static final Logger log = LoggerFactory.getLogger(WorkosClient.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
 
@@ -228,7 +231,10 @@ public class WorkosClient {
         } catch (WorkosException e) {
             throw e;
         } catch (Exception e) {
-            throw new WorkosException(502, "WorkOS call failed: " + e.getMessage(), Map.of());
+            // Transport failure (DNS/TLS/timeout). The cause names api.workos.com internals,
+            // so it goes to the log; the 502 message stays generic (#37).
+            log.warn("WorkOS {} {} failed", method, path, e);
+            throw new WorkosException(502, "WorkOS call failed", Map.of());
         }
     }
 

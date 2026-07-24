@@ -7,6 +7,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -22,6 +24,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class CoreAdminClient {
 
+    private static final Logger log = LoggerFactory.getLogger(CoreAdminClient.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final String coreBaseUrl;
@@ -47,7 +50,8 @@ public class CoreAdminClient {
             HttpResponse<byte[]> res = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
             return new CoreResponse(res.statusCode(), res.body() == null ? new byte[0] : res.body());
         } catch (Exception e) {
-            throw new CoreException("Failed calling core /api/org/users: " + e.getMessage());
+            log.warn("core-engine POST /api/org/users failed", e);
+            throw new CoreException("core-engine call failed");
         }
     }
 
@@ -62,7 +66,8 @@ public class CoreAdminClient {
             HttpResponse<byte[]> res = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
             return new CoreResponse(res.statusCode(), res.body() == null ? new byte[0] : res.body());
         } catch (Exception e) {
-            throw new CoreException("Failed calling core /api/me/account: " + e.getMessage());
+            log.warn("core-engine DELETE /api/me/account failed", e);
+            throw new CoreException("core-engine call failed");
         }
     }
 

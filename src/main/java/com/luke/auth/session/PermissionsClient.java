@@ -8,6 +8,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -25,6 +27,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class PermissionsClient {
 
+    private static final Logger log = LoggerFactory.getLogger(PermissionsClient.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
     private static final TypeReference<Map<String, String>> STR_MAP = new TypeReference<>() {};
@@ -80,10 +83,15 @@ public class PermissionsClient {
                 if (code / 100 == 2) {
                     return MAPPER.readValue(res.body(), type);
                 }
-                failure = new UpstreamException(code, req.uri().getPath() + " returned " + code);
+                // Status is safe to surface; the path names an internal API, so it stays in the log.
+                log.warn("Upstream {} returned {}", req.uri(), code);
+                failure = new UpstreamException(code, "Upstream returned " + code);
                 retryable = code >= 500; // 4xx is deterministic (e.g. 403 unprovisioned) — don't retry
             } catch (Exception e) {
-                failure = new UpstreamException(0, "Failed calling " + req.uri() + ": " + e.getMessage());
+                // The URI names an internal host — keep it in the log, out of the exception
+                // message, because callers surface that message to clients (#37).
+                log.warn("Upstream call failed: {} — {}", req.uri(), e.toString());
+                failure = new UpstreamException(0, "Upstream request did not complete");
                 retryable = true; // network/timeout — worth a retry
             }
             last = failure;

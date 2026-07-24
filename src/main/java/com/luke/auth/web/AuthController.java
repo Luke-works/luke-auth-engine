@@ -18,8 +18,10 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import com.luke.auth.web.error.ApiError;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.CookieValue;
@@ -507,7 +509,9 @@ public class AuthController {
         try {
             return gatewayKeys.mintActAsToken(engineUserId);
         } catch (Exception e) {
-            throw new CoreAdminClient.CoreException("Could not mint act-as token: " + e.getMessage());
+            // Signing-key internals must not reach the client (#37).
+            log.error("Could not mint act-as token for {}", engineUserId, e);
+            throw new CoreAdminClient.CoreException("Could not mint act-as token");
         }
     }
 
@@ -564,9 +568,11 @@ public class AuthController {
         } catch (SessionService.TenantForbiddenException e) {
             return error(HttpStatus.FORBIDDEN, "Forbidden", e.getMessage());
         } catch (PermissionsClient.UpstreamException e) {
-            return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", e.getMessage());
+            log.warn("Session build failed for {} [cid={}]: {}", engineUserId, ApiError.correlationId(), e.getMessage());
+            return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", ApiError.UPSTREAM_UNAVAILABLE);
         } catch (Exception e) {
-            return error(HttpStatus.INTERNAL_SERVER_ERROR, "Internal Error", e.getMessage());
+            log.error("Session build failed for {} [cid={}]", engineUserId, ApiError.correlationId(), e);
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "Internal Error", ApiError.INTERNAL);
         }
         return ResponseEntity.ok(body);
     }
@@ -657,7 +663,12 @@ public class AuthController {
         return HttpStatus.BAD_GATEWAY.value();
     }
 
-    private ResponseEntity<Map<String, String>> error(HttpStatus status, String title, String message) {
-        return ResponseEntity.status(status).body(Map.of("error", title, "message", message));
+    /**
+     * All inline error returns go through the same builder as
+     * {@link com.luke.auth.web.error.GlobalExceptionHandler}, so the caught and uncaught
+     * paths are indistinguishable to a client (#37).
+     */
+    private ResponseEntity<ProblemDetail> error(HttpStatus status, String title, String message) {
+        return ApiError.entity(status, title, message);
     }
 }

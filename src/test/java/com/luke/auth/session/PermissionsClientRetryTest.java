@@ -1,6 +1,7 @@
 package com.luke.auth.session;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.sun.net.httpserver.HttpServer;
@@ -68,5 +69,26 @@ class PermissionsClientRetryTest {
                 PermissionsClient.UpstreamException.class, () -> client(base).corePermissions("tok"));
         assertEquals(503, ex.status());
         assertEquals(3, hits.get(), "should stop at maxAttempts");
+    }
+
+    /**
+     * #37: callers surface {@code getMessage()} to clients, so the message must never carry
+     * the upstream URI (internal host/port/path). The detail belongs in the log only.
+     */
+    @Test
+    void exceptionMessageNeverCarriesTheUpstreamUri() throws Exception {
+        String base = startServer(n -> 503, "{}");
+        PermissionsClient.UpstreamException fromStatus = assertThrows(
+                PermissionsClient.UpstreamException.class, () -> client(base).corePermissions("tok"));
+        assertFalse(fromStatus.getMessage().contains(base), "leaked upstream host: " + fromStatus.getMessage());
+        assertFalse(fromStatus.getMessage().contains("/api/me/permissions"),
+                "leaked internal path: " + fromStatus.getMessage());
+
+        server.stop(0); // nothing listening → transport failure path
+        server = null;
+        PermissionsClient.UpstreamException fromTransport = assertThrows(
+                PermissionsClient.UpstreamException.class, () -> client(base).corePermissions("tok"));
+        assertFalse(fromTransport.getMessage().contains(base),
+                "leaked upstream host: " + fromTransport.getMessage());
     }
 }

@@ -26,3 +26,42 @@ jobs:
 
       - name: Compile, run tests, package
         run: ./mvnw -B -ntp verify
+
+  image:
+    name: Image (build, SBOM, CVE scan)
+    runs-on: ubuntu-latest
+    # Supply-chain gate (#41): build the container, produce an SBOM, and fail on a
+    # FIXABLE high/critical CVE. --ignore-unfixed means a base CVE with no patch yet
+    # can't permanently block delivery — Dependabot bumps the pinned base when a fix
+    # lands. Digest-pinned bases (see Dockerfile) keep the build reproducible.
+    #
+    # Tools run as their official images (mounting the docker socket) rather than the
+    # marketplace actions — the same approach the security-scan workflow settled on
+    # after the trivy action's pinned version proved unresolvable.
+    env:
+      IMAGE: luke-auth-engine:${{ github.sha }}
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+
+      - name: Build image
+        run: docker build -t "$IMAGE" .
+
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            anchore/syft:latest "docker:$IMAGE" -o cyclonedx-json > sbom.cyclonedx.json
+          echo "SBOM components: $(python3 -c 'import json,sys;print(len(json.load(open("sbom.cyclonedx.json")).get("components",[])))')"
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-auth-engine.cyclonedx.json
+          path: sbom.cyclonedx.json
+
+      - name: Scan image for fixable HIGH/CRITICAL CVEs
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 --format table "$IMAGE"

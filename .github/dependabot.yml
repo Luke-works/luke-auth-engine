@@ -1,0 +1,40 @@
+# Controlled update process for the supply chain (#41).
+# Dependabot opens PRs to bump the digest-pinned Docker bases, the pinned GitHub
+# Actions, and Maven dependencies — so pins stay current instead of rotting.
+version: 2
+updates:
+  # Digest-pinned base images in the Dockerfile (maven build stage + temurin runtime).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["dependencies", "docker", "security"]
+    commit-message:
+      prefix: "build(docker)"
+
+  # Pinned action versions in the workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["dependencies", "ci"]
+    commit-message:
+      prefix: "ci"
+
+  # Maven dependencies — grouped weekly to keep CVE exposure fresh without PR spam.
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "java"]
+    commit-message:
+      prefix: "deps"
+    groups:
+      spring-boot:
+        patterns: ["org.springframework*"]
+      test:
+        patterns: ["*junit*", "*mockito*"]

@@ -98,6 +98,16 @@ public class WorkosTokenVerifier {
         log.info("WorkosTokenVerifier: verifying WorkOS access tokens via JWKS {} (strict={})", url, strictValidation);
     }
 
+    /**
+     * True once the verifier can actually validate tokens (a JWKS decoder was built).
+     * False means it initialised fail-closed — no WorkOS config, or strict-validation
+     * without issuer/audience — so this instance can authenticate no one. Read by the
+     * readiness health indicator (#26).
+     */
+    public boolean isConfigured() {
+        return decoder != null;
+    }
+
     /** A RestTemplate with explicit connect/read timeouts for the JWKS fetch. */
     private static RestOperations jwksRestOperations() {
         SimpleClientHttpRequestFactory rf = new SimpleClientHttpRequestFactory();

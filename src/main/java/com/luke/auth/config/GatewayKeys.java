@@ -119,6 +119,16 @@ public class GatewayKeys {
      * The engine verifies the signature against {@link #publicJwkSetJson} and
      * trusts the {@code sub} as the user to authenticate.
      */
+    /**
+     * True once the signing keypair is initialised (so act-as tokens can be minted).
+     * Effectively always true post-boot — {@code @PostConstruct} builds an ephemeral or
+     * configured key, and {@code require-stable-key} would have failed the boot otherwise
+     * — but the readiness indicator (#26) checks it for completeness/defence-in-depth.
+     */
+    public boolean isReady() {
+        return rsaJwk != null && signer != null;
+    }
+
     public String mintActAsToken(String engineUserId) throws JOSEException {
         Instant now = Instant.now();
         JWTClaimsSet claims = new JWTClaimsSet.Builder()

@@ -1,10 +1,15 @@
 server:
   # Render injects PORT at runtime; 8083 is the local default (engine uses 8080)
   port: ${PORT:8083}
+  # Drain in-flight (proxied) requests on SIGTERM instead of cutting them off (#26).
+  shutdown: graceful
 
 spring:
   application:
     name: luke-auth-engine
+  lifecycle:
+    # Cap the drain so a stuck request can't block the rollout forever (#26).
+    timeout-per-shutdown-phase: 20s
   servlet:
     multipart:
       # This service is a PURE reverse proxy — it must NEVER parse request bodies. Spring's default
@@ -144,7 +149,23 @@ management:
         include: health,info
   endpoint:
     health:
-      show-details: always
+      # Split liveness (is the process alive) from readiness (can it do its job) — #26.
+      probes:
+        enabled: true
+      group:
+        # Liveness NEVER depends on an external — it only answers "is the app running",
+        # so a downstream blip can never trigger a restart. Render health-checks THIS.
+        liveness:
+          include: livenessState
+        # Readiness reflects the gateway's ability to serve: WorkOS verifier configured +
+        # signing key ready (authReadiness) and core-engine reachable (coreEngine). An
+        # orchestrator uses it to stop ROUTING to a not-ready instance, not to restart it.
+        readiness:
+          include: readinessState,authReadiness,coreEngine
+      # Was 'always' — that leaked internal component status on an unauthenticated probe.
+      # Status (UP/DOWN) is still public; the component breakdown is authorized-only.
+      show-details: when-authorized
+      show-components: when-authorized
 
 logging:
   # Tag every log line with the per-request correlation id (CorrelationIdFilter, MDC

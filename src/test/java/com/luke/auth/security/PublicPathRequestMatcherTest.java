@@ -60,4 +60,27 @@ class PublicPathRequestMatcherTest {
         // Preflight carries no credentials; it must never be gated (it reaches the CorsFilter).
         assertTrue(matcher.matches(req("OPTIONS", "/api/me/permissions")));
     }
+
+    /**
+     * Adversarial: anything that isn't unambiguously on the public surface must FAIL CLOSED
+     * (treated as protected → require auth). These are the bypasses a matcher must not fall for.
+     */
+    @Test
+    void bypassAttemptsFailClosed() {
+        String[] attempts = {
+                "/api/PUBLIC/x",              // case variation — startsWith is case-sensitive
+                "/api/Public/x",
+                "/api/publicx/y",            // prefix without the boundary slash
+                "/api/public",               // the bare segment, no trailing resource
+                "/api/mypublic/x",           // 'public' not at the start of the segment path
+                "/api/public%2f%2e%2e%2fme", // encoded slash + encoded traversal
+                "/api/me;/../public/x",      // matrix param + traversal
+                "/api/public/../../me",      // double traversal
+                "/embedx/tok",               // near-miss on /embed/
+                "/api/internal/secrets",     // a genuinely protected internal path
+        };
+        for (String uri : attempts) {
+            assertFalse(matcher.matches(req("GET", uri)), uri + " MUST fail closed (require auth)");
+        }
+    }
 }

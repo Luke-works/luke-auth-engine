@@ -47,3 +47,13 @@ signed digest instead of building from source — an infrastructure decision for
 Until then, the reproducibility (digest pins) and vulnerability (SBOM + gating scan)
 halves of the supply-chain story are covered; the authenticity half waits on that
 registry decision.
+
+## First scan caught real CVEs
+
+The gate paid for itself on its first run. Trivy flagged fixable CRITICAL/HIGH CVEs in
+the app's own dependencies — `jackson-databind` (CVE-2026-54512, arbitrary code
+execution), `tomcat-embed-core` (CVE-2026-41293 / -43515, both CRITICAL), and
+`spring-boot` 3.4.13 itself (CVE-2026-40973). Spring Boot 3.4.x was already EOL (3.4.13
+was its last patch), so the fix was to bump to **3.5.16**, which manages the patched
+transitive versions (jackson 2.21.4, tomcat 10.1.55). No `.trivyignore` was needed — the
+CVEs were remediated, not suppressed.

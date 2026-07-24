@@ -49,6 +49,8 @@ core-engine and cached in-memory per `(user, tenant)` for a short TTL. See
 
 Full request/response shapes, headers and status codes: **`docs/API.md`**.
 The uniform error body: **`docs/ERRORS.md`**.
+A machine-readable **OpenAPI** document is served at **`/v3/api-docs`** (unauthenticated; describes
+endpoint shapes only).
 
 ## Configuration
 

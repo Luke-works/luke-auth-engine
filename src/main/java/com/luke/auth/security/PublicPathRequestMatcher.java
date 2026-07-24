@@ -34,7 +34,8 @@ public class PublicPathRequestMatcher implements RequestMatcher {
     /** Fixed public prefixes (non-proxy). */
     private static final Set<String> PREFIXES = Set.of(
             "/service/keys/",   // operator key revoke/unrevoke (X-Operator-Token at the controller)
-            "/actuator/");      // health/info + liveness/readiness probes
+            "/actuator/",       // health/info + liveness/readiness probes
+            "/v3/api-docs");    // OpenAPI spec (#59) — describes endpoint shapes, carries no secrets
 
     @Override
     public boolean matches(HttpServletRequest request) {

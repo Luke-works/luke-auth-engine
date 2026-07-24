@@ -61,6 +61,15 @@
             <artifactId>lettuce-core</artifactId>
         </dependency>
 
+        <!-- OpenAPI: serve a machine-readable spec of the gateway surface at /v3/api-docs (#59).
+             The -api variant is JSON-only (no Swagger UI webjars) to keep the dependency + CVE
+             surface small. -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-api</artifactId>
+            <version>2.8.9</version>
+        </dependency>
+
         <!-- Embedded Redis for the shared-limiter integration test (no Docker needed). -->
         <dependency>
             <groupId>com.github.codemonstur</groupId>

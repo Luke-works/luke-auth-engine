@@ -31,6 +31,7 @@ class PublicPathRequestMatcherTest {
                 "/service/token", "/service/keys/1ec1c26b/revoke",
                 "/webhooks/workos", "/dev/token",
                 "/actuator/health/liveness", "/actuator/health/readiness", "/actuator/info",
+                "/v3/api-docs", "/v3/api-docs/swagger-config",
                 "/api/public/embed/xyz", "/embed/tok123", "/embed-assets/app.js",
         }) {
             assertTrue(matcher.matches(req("GET", uri)), uri + " should be public");

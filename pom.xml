@@ -43,6 +43,13 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
+        <!-- Bean Validation: backs @Validated on LukeAuthProperties so a malformed
+             config is caught at bind time rather than at first request (#35). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
         <!-- Nimbus JOSE + JWT: verify Clerk tokens (NimbusJwtDecoder) and
              mint/sign our internal act-as-user tokens. Pulled via Spring
              Security's oauth2-jose module to stay version-aligned with Boot. -->

@@ -1,8 +1,6 @@
 package com.luke.auth.config;
 
-import java.util.Arrays;
 import java.util.List;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.cors.CorsConfiguration;
@@ -16,15 +14,15 @@ import org.springframework.web.filter.CorsFilter;
 @Configuration
 public class CorsConfig {
 
-    @Value("${luke.cors.allowed-origins:http://localhost:*}")
-    private String allowedOrigins;
+    private final LukeCorsProperties corsProperties;
+
+    public CorsConfig(LukeCorsProperties corsProperties) {
+        this.corsProperties = corsProperties;
+    }
 
     @Bean
     public CorsFilter corsFilter() {
-        List<String> origins = Arrays.stream(allowedOrigins.split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .toList();
+        List<String> origins = corsProperties.origins();
 
         CorsConfiguration config = new CorsConfiguration();
         config.setAllowedOriginPatterns(origins);

@@ -2,6 +2,7 @@ package com.luke.auth;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 
 /**
  * Luke Auth Engine — the consumer-facing gateway.
@@ -20,6 +21,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * instances, deployments) — it forwards them opaquely.
  */
 @SpringBootApplication
+@ConfigurationPropertiesScan // picks up LukeAuthProperties / LukeCorsProperties (#35)
 public class AuthEngineApplication {
     public static void main(String[] args) {
         SpringApplication.run(AuthEngineApplication.class, args);

@@ -19,9 +19,9 @@ import org.springframework.web.filter.CorsFilter;
 class CorsConfigTest {
 
     private UrlBasedCorsConfigurationSource source() {
-        CorsConfig cc = new CorsConfig();
-        ReflectionTestUtils.setField(cc, "allowedOrigins", "https://app.example.com");
-        CorsFilter filter = cc.corsFilter();
+        LukeCorsProperties props = new LukeCorsProperties();
+        props.setAllowedOrigins("https://app.example.com");
+        CorsFilter filter = new CorsConfig(props).corsFilter();
         return (UrlBasedCorsConfigurationSource) ReflectionTestUtils.getField(filter, "configSource");
     }
 

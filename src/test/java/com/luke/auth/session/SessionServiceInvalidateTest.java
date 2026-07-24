@@ -7,6 +7,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.luke.auth.config.GatewayKeys;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,7 +32,7 @@ class SessionServiceInvalidateTest {
         when(pc.corePermissions("act")).thenReturn(core);
         when(pc.capabilities(anyString(), anyString(), anyString())).thenReturn(Map.of());
 
-        SessionService svc = new SessionService(keys, pc, 60, 10_000);
+        SessionService svc = new SessionService(keys, pc, 60, 10_000, new SimpleMeterRegistry());
 
         svc.session("user-1", "A");
         svc.session("user-1", "A"); // served from cache → no second upstream call

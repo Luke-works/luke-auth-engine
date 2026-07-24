@@ -1,11 +1,17 @@
 package com.luke.auth.session;
 
 import com.luke.auth.config.GatewayKeys;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 
 /**
@@ -26,12 +32,28 @@ public class SessionService {
     /** Bounded + TTL'd so it can't grow without limit (was an unbounded map). */
     private final BoundedTtlCache<Map<String, Object>> cache;
 
+    /**
+     * Single-flight guard (#34): one in-flight computation per (user, tenant) key.
+     * Concurrent misses — and concurrent {@code fresh=true} bypasses — for the same key
+     * join the one leader's future instead of each storming the upstreams.
+     */
+    private final ConcurrentHashMap<String, CompletableFuture<Map<String, Object>>> inFlight =
+            new ConcurrentHashMap<>();
+
+    /** Incremented once per actual upstream computation — i.e. per storm-unit avoided. */
+    @Nullable
+    private final Counter upstreamLoads;
+
     public SessionService(GatewayKeys gatewayKeys, PermissionsClient client,
                           @Value("${luke.auth.session.cache-ttl-seconds:60}") long cacheTtlSeconds,
-                          @Value("${luke.auth.session.cache-max-entries:10000}") int cacheMaxEntries) {
+                          @Value("${luke.auth.session.cache-max-entries:10000}") int cacheMaxEntries,
+                          @Nullable MeterRegistry meterRegistry) {
         this.gatewayKeys = gatewayKeys;
         this.client = client;
         this.cache = new BoundedTtlCache<>(cacheMaxEntries, cacheTtlSeconds * 1000);
+        this.upstreamLoads = meterRegistry == null ? null : Counter.builder("auth.session.upstream.loads")
+                .description("Session views computed from the upstream systems of record (single-flight leaders)")
+                .register(meterRegistry);
     }
 
     /**
@@ -55,6 +77,53 @@ public class SessionService {
             if (hit != null) {
                 return hit;
             }
+        }
+
+        // Single-flight: the first arrival for this key becomes the leader and computes;
+        // every concurrent miss/bypass for the same key joins the leader's future rather
+        // than firing its own act-as-mint + corePermissions + capabilities storm (#34).
+        CompletableFuture<Map<String, Object>> mine = new CompletableFuture<>();
+        CompletableFuture<Map<String, Object>> leader = inFlight.putIfAbsent(cacheKey, mine);
+        if (leader != null) {
+            return await(leader); // a computation is already running for this key
+        }
+        try {
+            Map<String, Object> result = load(engineUserId, requestedTenant, cacheKey);
+            mine.complete(result);
+            return result;
+        } catch (Throwable t) {
+            // Followers waiting on `mine` must see the SAME exception (so the error boundary
+            // maps it identically for leader and followers).
+            mine.completeExceptionally(t);
+            throw t;
+        } finally {
+            inFlight.remove(cacheKey, mine);
+        }
+    }
+
+    /** Wait for the leader's computation, re-throwing its original (unwrapped) exception. */
+    private Map<String, Object> await(CompletableFuture<Map<String, Object>> leader) throws Exception {
+        try {
+            return leader.get();
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception ex) {
+                throw ex; // e.g. UpstreamException / TenantForbiddenException — mapped by the error boundary
+            }
+            if (cause instanceof Error err) {
+                throw err;
+            }
+            throw new IllegalStateException("Session computation failed", cause);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw e;
+        }
+    }
+
+    /** Compute the session view from the systems of record. One call = one upstream storm-unit. */
+    private Map<String, Object> load(String engineUserId, String requestedTenant, String cacheKey) throws Exception {
+        if (upstreamLoads != null) {
+            upstreamLoads.increment();
         }
 
         // 1. Camunda view — called as the user via a minted act-as token.

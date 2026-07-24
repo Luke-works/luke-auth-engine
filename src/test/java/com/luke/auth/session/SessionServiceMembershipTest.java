@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.luke.auth.config.GatewayKeys;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,7 +30,7 @@ class SessionServiceMembershipTest {
         core.put("roles", Map.of());
         when(pc.corePermissions("act")).thenReturn(core);
         when(pc.capabilities(anyString(), anyString(), anyString())).thenReturn(Map.of());
-        return new SessionService(keys, pc, 60, 10000);
+        return new SessionService(keys, pc, 60, 10000, new SimpleMeterRegistry());
     }
 
     @Test

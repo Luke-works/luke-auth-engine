@@ -34,19 +34,43 @@ curl -sI -H "Authorization: Bearer $tok" \
   | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}'
 ```
 
-## Known gap — signing & provenance
+## Signing & provenance (half A — shipped)
 
-The image is **not** cosign-signed and carries no SLSA provenance attestation. This is a
-deliberate scope boundary, not an oversight: **Render builds the deployed image from
-source on every push** — there is no image published to a registry for us to sign or
-attest, and nothing pulls a signed digest. Adding signing/provenance requires first
-moving to a **build-and-push-to-a-registry** model (GHCR/ECR) with Render pulling the
-signed digest instead of building from source — an infrastructure decision for
-`luke-platform`, tracked as the remaining part of #41.
+Every push to `develop`/`main` publishes a **signed, attested** image to GHCR via
+`.github/workflows/image-publish.yml`:
 
-Until then, the reproducibility (digest pins) and vulnerability (SBOM + gating scan)
-halves of the supply-chain story are covered; the authenticity half waits on that
-registry decision.
+- **Registry:** `ghcr.io/luke-works/luke-auth-engine`, tagged by branch + `sha-<commit>`.
+- **Signature:** `cosign sign`, **keyless** — the workflow's OIDC identity is bound into a
+  short-lived Sigstore certificate (no keys to manage/rotate). Verify with:
+  ```bash
+  cosign verify ghcr.io/luke-works/luke-auth-engine@sha256:<digest> \
+    --certificate-identity-regexp 'https://github.com/Luke-works/luke-auth-engine/.*' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+- **Provenance:** an SLSA build-provenance attestation (`actions/attest-build-provenance`,
+  keyless) pushed to the registry alongside the image.
+
+This is deploy-safe and additive: **Render still builds from source today** — the signed
+image is published in parallel, not yet pulled.
+
+## Half B — pull the signed image on Render (runbook, pending)
+
+To close the loop (Render deploys the signed artifact instead of rebuilding):
+
+1. **Registry pull creds on Render.** GHCR package → grant read to a Render-usable token
+   (or make the package internal to the org and add a `ghcr.io` registry credential in the
+   Render dashboard).
+2. **Switch the service to image-backed.** In `luke-platform/render.yaml`, replace the
+   auth service's `dockerfilePath: ./Dockerfile` with `image.url:
+   ghcr.io/luke-works/luke-auth-engine@sha256:<digest>` (pin the **digest**, not a tag) and
+   wire the pull credential. Render then pulls + runs that exact signed image.
+3. **Verify before promote.** Render has no cosign admission control, so add a CI/CD gate
+   that runs `cosign verify` (command above) on the digest before it's promoted — the
+   verification step Render itself can't enforce.
+
+> **Runtime-verification caveat:** because Render isn't Kubernetes, signature *enforcement*
+> at pull is not native. The artifacts are signed, attested, digest-pinned and verifiable;
+> enforcement lives in the CI gate (step 3), not in an admission controller.
 
 ## First scan caught real CVEs
 

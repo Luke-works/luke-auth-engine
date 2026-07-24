@@ -1,0 +1,70 @@
+# Supply-chain half A (luke-platform #11): build → push to GHCR → cosign-sign → SLSA-attest.
+# Additive and deploy-safe — Render still builds from source today; this just PUBLISHES a signed,
+# attested image to the registry. Flipping Render to pull it is half B (see docs/SUPPLY-CHAIN.md).
+#
+# Signing + attestation are KEYLESS: the job's OIDC identity is bound into a short-lived Sigstore
+# certificate (no keys to manage or rotate). Runs only on push (never PRs — nothing is published
+# for an unmerged change).
+name: Publish signed image
+
+on:
+  push:
+    branches: [develop, main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write      # push to GHCR
+  id-token: write      # keyless cosign + provenance attestation (OIDC)
+  attestations: write  # actions/attest-build-provenance
+
+jobs:
+  publish:
+    name: Build, push, sign, attest
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/luke-works/luke-auth-engine  # GHCR requires a lowercase path
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the image (keyless)
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - name: Attest SLSA build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        run: |
+          echo "Published, signed, and attested: ${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Verify: cosign verify ${IMAGE}@${DIGEST} \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --certificate-identity-regexp 'https://github.com/Luke-works/luke-auth-engine/.*' \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}

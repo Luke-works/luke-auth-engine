@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 import com.luke.auth.audit.AuditService;
 import com.luke.auth.identity.IdentityResolver;
 import com.luke.auth.session.SessionService;
+import com.luke.auth.workos.OnboardingClient;
 import jakarta.servlet.http.HttpServletRequest;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,12 +28,13 @@ class WorkosWebhookControllerTest {
     private final WorkosWebhookVerifier verifier = mock(WorkosWebhookVerifier.class);
     private final SessionService sessions = mock(SessionService.class);
     private final AuditService audit = mock(AuditService.class);
+    private final OnboardingClient onboarding = mock(OnboardingClient.class);
     private WorkosWebhookController controller;
     private HttpServletRequest req;
 
     @BeforeEach
     void setUp() {
-        controller = new WorkosWebhookController(verifier, new IdentityResolver(), sessions, audit);
+        controller = new WorkosWebhookController(verifier, new IdentityResolver(), sessions, audit, onboarding);
         req = mock(HttpServletRequest.class);
     }
 
@@ -59,16 +61,34 @@ class WorkosWebhookControllerTest {
     }
 
     @Test
-    void userDeletedInvalidatesSessionCacheAndAudits() {
+    void userDeletedInvalidatesCacheDeprovisionsEngineAndAudits() {
         when(verifier.isEnabled()).thenReturn(true);
         when(verifier.verify(any(), any(), anyLong())).thenReturn(true);
+        when(onboarding.deprovision("workos:user_abc123")).thenReturn(true);
 
         var r = controller.receive(
                 body("{\"event\":\"user.deleted\",\"data\":{\"id\":\"user_abc123\"}}"), "good", req);
 
         assertEquals(200, r.getStatusCode().value());
         verify(sessions).invalidate("workos:user_abc123");
+        verify(onboarding).deprovision("workos:user_abc123"); // engine membership removed
         verify(audit).record(eq("user.deprovision"), eq(AuditService.SUCCESS),
+                any(), eq("workos:user_abc123"), any(), any());
+    }
+
+    @Test
+    void engineDeprovisionFailureReturns500SoWorkOsRetries() {
+        when(verifier.isEnabled()).thenReturn(true);
+        when(verifier.verify(any(), any(), anyLong())).thenReturn(true);
+        when(onboarding.deprovision("workos:user_abc123"))
+                .thenThrow(new OnboardingClient.OnboardingException("core down"));
+
+        var r = controller.receive(
+                body("{\"event\":\"user.deleted\",\"data\":{\"id\":\"user_abc123\"}}"), "good", req);
+
+        assertEquals(500, r.getStatusCode().value()); // WorkOS will retry; both steps are idempotent
+        verify(sessions).invalidate("workos:user_abc123"); // cache still invalidated up front
+        verify(audit).record(eq("user.deprovision"), eq(AuditService.FAILURE),
                 any(), eq("workos:user_abc123"), any(), any());
     }
 

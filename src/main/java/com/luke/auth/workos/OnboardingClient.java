@@ -109,6 +109,53 @@ public class OnboardingClient {
         }
     }
 
+    /** True when an operator credential is configured — enough to deprovision (no default tenant needed). */
+    public boolean deprovisionEnabled() {
+        return StringUtils.hasText(operatorUser) && StringUtils.hasText(operatorPassword);
+    }
+
+    /**
+     * Remove all engine access for {@code engineUserId} via the operator-only
+     * {@code POST /api/admin/deprovision-user} (the counterpart to the user's own account
+     * delete). Called from the WorkOS deprovisioning webhook (#38). Idempotent on the engine
+     * side. Returns {@code false} (with a warning) when no operator credential is configured;
+     * throws {@link OnboardingException} on a non-2xx / transport failure so the webhook can
+     * signal WorkOS to retry.
+     */
+    public boolean deprovision(String engineUserId) {
+        if (!deprovisionEnabled()) {
+            log.warn("Deprovision skipped for {} — no operator credential "
+                    + "(ONBOARDING_OPERATOR_USER / ONBOARDING_OPERATOR_PASSWORD)", engineUserId);
+            return false;
+        }
+        try {
+            byte[] json = MAPPER.writeValueAsBytes(Map.of("id", engineUserId));
+            HttpRequest req = HttpRequest.newBuilder(URI.create(coreBaseUrl + "/api/admin/deprovision-user"))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Basic " + basicAuthHeader())
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(json))
+                    .build();
+            HttpResponse<byte[]> res = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            if (res.statusCode() / 100 != 2) {
+                log.error("Deprovision failed for {} — core-engine returned {}", engineUserId, res.statusCode());
+                throw new OnboardingException("Deprovision failed (" + res.statusCode() + ")");
+            }
+            log.info("Deprovisioned engine user {} via core-engine", engineUserId);
+            return true;
+        } catch (OnboardingException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("Deprovision call failed for {}", engineUserId, e);
+            throw new OnboardingException("Deprovision call failed");
+        }
+    }
+
+    private String basicAuthHeader() {
+        return Base64.getEncoder().encodeToString(
+                (operatorUser + ":" + operatorPassword).getBytes(StandardCharsets.UTF_8));
+    }
+
     /** Long random secret so the FluxNova password field is satisfied but never matches. */
     private static String randomUnusablePassword() {
         byte[] bytes = new byte[48];

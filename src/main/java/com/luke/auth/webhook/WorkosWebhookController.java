@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.luke.auth.audit.AuditService;
 import com.luke.auth.identity.IdentityResolver;
 import com.luke.auth.session.SessionService;
+import com.luke.auth.workos.OnboardingClient;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
 import java.util.Set;
@@ -20,18 +21,17 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * Consumes signature-verified WorkOS webhooks for user-lifecycle / directory-sync events (#38).
  *
- * <p><b>What this does today (the safe, self-contained slice):</b> on a verified
- * deprovisioning event it immediately invalidates the gateway's cached authorization view for
- * that user and audits the event — so a removed user's cached session stops being honored at
- * once, instead of lingering for the cache TTL. Disabled (404) until {@code WORKOS_WEBHOOK_SECRET}
+ * <p><b>On a verified deprovisioning event</b> ({@code user.deleted}) it: (1) invalidates the
+ * gateway's cached authorization view for the user immediately, and (2) calls core-engine's
+ * operator {@code /api/admin/deprovision-user} to remove their engine membership (#38). WorkOS
+ * has already invalidated the deleted user's sessions/refresh tokens, so no separate token
+ * revocation call is needed for this event. Disabled (404) until {@code WORKOS_WEBHOOK_SECRET}
  * is set, so dev/qa are unaffected.
  *
- * <p><b>What still needs an architecture decision (see the issue):</b> removing the user's
- * <em>engine membership</em> and revoking their <em>WorkOS session / refresh token</em>. The
- * stateless gateway holds no operator credential to deprovision an arbitrary user in
- * core-engine, and directory-sync (dsync.*) user→platform-user mapping depends on the WorkOS
- * Directory Sync setup. Those events are acknowledged and audited as {@code pending} rather
- * than silently dropped.
+ * <p>If the engine deprovision fails (core unreachable), the handler returns 500 so WorkOS
+ * retries — the cache invalidation and the engine deprovision are both idempotent, so a retry
+ * is safe. Directory-sync ({@code dsync.*}) events still need the WorkOS Directory Sync
+ * user→platform-user mapping; they are acknowledged and audited as {@code pending}.
  */
 @RestController
 public class WorkosWebhookController {
@@ -46,13 +46,16 @@ public class WorkosWebhookController {
     private final IdentityResolver identityResolver;
     private final SessionService sessionService;
     private final AuditService auditService;
+    private final OnboardingClient onboardingClient;
 
     public WorkosWebhookController(WorkosWebhookVerifier verifier, IdentityResolver identityResolver,
-                                   SessionService sessionService, AuditService auditService) {
+                                   SessionService sessionService, AuditService auditService,
+                                   OnboardingClient onboardingClient) {
         this.verifier = verifier;
         this.identityResolver = identityResolver;
         this.sessionService = sessionService;
         this.auditService = auditService;
+        this.onboardingClient = onboardingClient;
     }
 
     @PostMapping("/webhooks/workos")
@@ -83,11 +86,20 @@ public class WorkosWebhookController {
 
         if (DEPROVISION_EVENTS.contains(type) && workosUserId != null) {
             String engineUserId = identityResolver.toEngineUserId(workosUserId);
-            // Fully within the gateway's power: drop the cached authorization view NOW.
+            // 1. Drop the cached authorization view NOW (immediate, local, idempotent).
             sessionService.invalidate(engineUserId);
-            auditService.record("user.deprovision", AuditService.SUCCESS, "workos:webhook", engineUserId, null, request);
-            log.info("WorkOS webhook: deprovision '{}' — invalidated session cache. Engine membership "
-                    + "removal + token revocation are pending the deprovisioning-path decision (#38).", engineUserId);
+            // 2. Remove the engine membership via the operator endpoint. WorkOS has already
+            //    invalidated the deleted user's sessions/refresh tokens, so nothing else to revoke.
+            try {
+                onboardingClient.deprovision(engineUserId);
+                auditService.record("user.deprovision", AuditService.SUCCESS, "workos:webhook", engineUserId, null, request);
+                log.info("WorkOS webhook: deprovisioned '{}' (cache invalidated + engine membership removed).", engineUserId);
+            } catch (RuntimeException e) {
+                // Core unreachable — let WorkOS retry (both steps are idempotent). Audit the gap.
+                auditService.record("user.deprovision", AuditService.FAILURE, "workos:webhook", engineUserId, null, request);
+                log.error("WorkOS webhook: engine deprovision of '{}' failed — returning 500 so WorkOS retries.", engineUserId, e);
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+            }
         } else if (type != null && type.startsWith("dsync.")) {
             // Directory-sync events need the user→platform-user mapping decision before we can act.
             auditService.record("webhook.workos.dsync", "pending", "workos:webhook", workosUserId, null, request);

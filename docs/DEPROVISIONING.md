@@ -1,9 +1,9 @@
 # User deprovisioning (SCIM / directory-sync)
 
-Status: **partial (#38)** — the webhook and the gateway-local half are built; the
-cross-service half needs a decision.
+Status: **the `user.deleted` leaver loop is closed (#38).** Directory-Sync (`dsync.*`)
+mapping remains, gated on the WorkOS Directory Sync setup.
 
-## What's built
+## The flow
 
 `POST /webhooks/workos` — a signature-verified WorkOS webhook.
 
@@ -12,35 +12,34 @@ cross-service half needs a decision.
   (`WorkosWebhookVerifier`).
 - **Disabled by default:** with no `WORKOS_WEBHOOK_SECRET` set (dev/qa), the endpoint
   returns 404 — nothing to boot-break, nothing to trust.
-- **On `user.deleted`:** the gateway immediately invalidates its cached authorization
-  view for `workos:<id>` and audits `user.deprovision`. This closes the window where a
-  removed user's cached session was honored for the cache TTL.
+- **On `user.deleted`:**
+  1. the gateway invalidates its cached authorization view for `workos:<id>` immediately
+     (closing the cache-TTL window), then
+  2. calls core-engine's operator `POST /api/admin/deprovision-user` (operator Basic auth
+     via `ONBOARDING_OPERATOR_USER`/`_PASSWORD`) to remove the user's tenant + group
+     memberships, delete the engine user, purge capability grants, and delete any tenant
+     they solely owned — the same cleanup as self-service account deletion, shared via
+     core-engine's `UserDeprovisioningService`.
+  3. audits `user.deprovision`.
+  If the engine call fails (core unreachable), the handler returns **500** so WorkOS
+  retries — both steps are idempotent, so a retry is safe.
+- **Token revocation:** none is needed for `user.deleted` — WorkOS has already invalidated
+  the deleted user's sessions and refresh tokens as part of the deletion.
 - **On `dsync.*`:** acknowledged and audited as `pending` (see below).
 
-## What still needs a decision
+## What still needs the WorkOS Directory Sync setup
 
-The full joiner-mover-**leaver** loop isn't closed yet, because the last steps leave
-the stateless gateway's authority:
+**Directory-Sync (`dsync.*`) mapping.** dsync events identify a *directory* user, which
+must be mapped to the platform (WorkOS User Management) user before we can act. That
+mapping depends on the enterprise's **WorkOS Directory Sync** configuration (a paid WorkOS
+capability). Once Directory Sync is enabled for a tenant, deactivation events map to a
+platform user and can reuse the exact same path as `user.deleted` above — invalidate cache
+→ `deprovision(engineUserId)` → audit. The plumbing is in place; only the event→user
+mapping is pending.
 
-1. **Remove engine membership.** Deprovisioning a user the gateway isn't acting *as*
-   requires an **operator-authenticated** call to core-engine to remove that user's
-   membership by id. core-engine has no such endpoint today (it has self-service
-   `/api/me/account` and operator onboarding, not operator "remove user X"). Decision:
-   add an operator deprovision endpoint in core-engine, and give the gateway an operator
-   credential (or route the webhook to core directly).
+## Configuration
 
-2. **Revoke the WorkOS session / refresh token.** WorkOS is the session system of record;
-   revoking a removed user's live session/refresh token is a WorkOS Management API call.
-   Decision: which call, and with what credential.
-
-3. **Directory Sync (dsync.*) mapping.** dsync events identify a *directory* user, which
-   must be mapped to the platform (WorkOS User Management) user before we can act. This
-   depends on the enterprise's **WorkOS Directory Sync** setup — a product/onboarding
-   decision (Directory Sync is a paid WorkOS capability), not just code.
-
-## Recommended next step
-
-Enable WorkOS Directory Sync for a pilot enterprise tenant; add the core-engine operator
-deprovision endpoint (#38 continues there); then wire steps 1–2 into this handler behind
-the same signature gate. The gateway-local cache invalidation already shipped is
-forward-compatible — it stays correct once the rest lands.
+| Env var | Purpose |
+|---|---|
+| `WORKOS_WEBHOOK_SECRET` | WorkOS dashboard → Webhooks signing secret. Blank ⇒ endpoint disabled (404). |
+| `ONBOARDING_OPERATOR_USER` / `ONBOARDING_OPERATOR_PASSWORD` | operator credential the deprovision call authenticates with (same as onboarding). Without it, the webhook still invalidates the cache but logs that engine removal was skipped. |

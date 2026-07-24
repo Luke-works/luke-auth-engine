@@ -12,8 +12,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * Dev-only: mints an act-as token for a given engine userId so downstream
- * resource servers (e.g. capability-engine) can be exercised locally without a
- * real Clerk login. Returns 404 unless {@code luke.auth.dev-mode=true}.
+ * resource servers (e.g. core-engine) can be exercised locally without a
+ * real WorkOS login. Returns 404 unless {@code luke.auth.dev-mode=true}.
  *
  * <p>Defense-in-depth: the bean is registered ONLY under the {@code dev} Spring
  * profile, so in any prod profile the endpoint does not exist at all — on top of

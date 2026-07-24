@@ -11,7 +11,7 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>{@code luke-core-engine} fetches this to verify the act-as-user tokens the
  * gateway mints. No secret is exposed — only the public half of the keypair.
  * This is the engine-facing trust anchor; it is intentionally unauthenticated,
- * exactly like Clerk's own JWKS endpoint.
+ * exactly like WorkOS's own JWKS endpoint.
  */
 @RestController
 public class JwksController {

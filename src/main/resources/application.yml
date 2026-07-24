@@ -47,7 +47,7 @@ luke:
     session:
       cache-ttl-seconds: ${SESSION_CACHE_TTL:60}
 
-    # ── Service accounts (robots, no Clerk) ─────────────────────────────────
+    # ── Service accounts (robots, no WorkOS) ────────────────────────────────
     # Comma-separated key=userId pairs. A service POSTs /service/token with
     # X-Service-Key and gets an act-as token for its userId (which must be
     # provisioned in the engine like a human). e.g.

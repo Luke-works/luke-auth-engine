@@ -4,6 +4,11 @@
 > database. It verifies identity, *asks* the systems that own the truth what a
 > user can do, combines the answer for the UI, and vouches for the user to those
 > systems — nothing more.
+>
+> **Update:** the human-authentication provider is now **WorkOS** (the engine
+> verifies WorkOS access tokens and namespaces identities as `workos:<sub>`).
+> "Clerk" below is historical — the *translator* design is unchanged; only the
+> upstream identity provider differs.
 
 ## The two things this must do
 
@@ -97,7 +102,7 @@ enforcement never depends on the token's word.)
 
 ```json
 {
-  "userId": "clerk:user_2abc",
+  "userId": "workos:user_2abc",
   "tenant": "t-acme",
   "tenants": ["t-acme", "t-globex"],
   "camunda":      { "tenantUser": "read-write", "processUser": "none",

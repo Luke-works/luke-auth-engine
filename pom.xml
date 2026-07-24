@@ -50,7 +50,7 @@
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
-        <!-- Nimbus JOSE + JWT: verify Clerk tokens (NimbusJwtDecoder) and
+        <!-- Nimbus JOSE + JWT: verify WorkOS access tokens (NimbusJwtDecoder) and
              mint/sign our internal act-as-user tokens. Pulled via Spring
              Security's oauth2-jose module to stay version-aligned with Boot. -->
         <dependency>

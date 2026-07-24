@@ -16,7 +16,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Service-account token endpoint — the robot equivalent of the Clerk login.
+ * Service-account token endpoint — the robot equivalent of the WorkOS login.
  *
  * <p>{@code POST /service/token} with header {@code X-Service-Key: <key>} →
  * {@code { token }}: a short-lived act-as token for the key's service userId.

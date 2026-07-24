@@ -18,7 +18,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
- * Maps service-account API keys to engine userIds — the non-Clerk ingress for
+ * Maps service-account API keys to engine userIds — the non-WorkOS ingress for
  * robots / service accounts (mostly "Process Users").
  *
  * <p>Keys live in config (no DB; auth-engine stays stateless), as a comma-separated

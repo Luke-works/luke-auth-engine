@@ -1,13 +1,13 @@
 package com.luke.auth.audit;
 
 import com.luke.auth.config.CorrelationIdFilter;
+import com.luke.auth.config.LukeAuthProperties;
 import com.luke.auth.web.ClientIp;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -40,13 +40,13 @@ public class AuditService {
     private final int trustedProxyHops;
 
     @Autowired
-    public AuditService(@Value("${luke.auth.ratelimit.trusted-proxy-hops:0}") int trustedProxyHops) {
-        this.trustedProxyHops = Math.max(0, trustedProxyHops);
+    public AuditService(LukeAuthProperties props) {
+        this.trustedProxyHops = Math.max(0, props.getRatelimit().getTrustedProxyHops());
     }
 
     /** Test/legacy convenience: no trusted proxies (leftmost-XFF, single-hop). */
     public AuditService() {
-        this(0);
+        this.trustedProxyHops = 0;
     }
 
     /**

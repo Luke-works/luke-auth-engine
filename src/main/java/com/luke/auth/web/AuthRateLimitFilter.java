@@ -3,12 +3,12 @@ package com.luke.auth.web;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
+import com.luke.auth.config.LukeAuthProperties;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
@@ -39,11 +39,9 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
      *  trusted-proxy count in prod so an attacker can't rotate the key by prepending IPs. */
     private final int trustedProxyHops;
 
-    public AuthRateLimitFilter(
-            RateLimitStore limiter,
-            @Value("${luke.auth.ratelimit.trusted-proxy-hops:0}") int trustedProxyHops) {
+    public AuthRateLimitFilter(RateLimitStore limiter, LukeAuthProperties props) {
         this.limiter = limiter;
-        this.trustedProxyHops = Math.max(0, trustedProxyHops);
+        this.trustedProxyHops = Math.max(0, props.getRatelimit().getTrustedProxyHops());
     }
 
     @Override

@@ -34,6 +34,7 @@ public class LukeAuthProperties {
     private @Valid Workos workos = new Workos();
     private @Valid Gateway gateway = new Gateway();
     private @Valid Session session = new Session();
+    private @Valid Ratelimit ratelimit = new Ratelimit();
 
     public static class CoreEngine {
         /** Upstream engine every {@code /api/**} route proxies to. */
@@ -112,6 +113,31 @@ public class LukeAuthProperties {
         public void setCacheTtlSeconds(int cacheTtlSeconds) { this.cacheTtlSeconds = cacheTtlSeconds; }
     }
 
+    public static class Ratelimit {
+        @Min(1)
+        private int maxRequests = 10;
+        @Min(1)
+        private long windowSeconds = 60;
+        @Min(1)
+        private int maxKeys = 50_000;
+        /** Trusted reverse-proxy hops for X-Forwarded-For resolution (limiter + audit source IP). */
+        @Min(0)
+        private int trustedProxyHops = 0;
+        /** Blank ⇒ in-memory per-instance; set to enforce the limit globally across replicas (#56). */
+        private String redisUrl = "";
+
+        public int getMaxRequests() { return maxRequests; }
+        public void setMaxRequests(int maxRequests) { this.maxRequests = maxRequests; }
+        public long getWindowSeconds() { return windowSeconds; }
+        public void setWindowSeconds(long windowSeconds) { this.windowSeconds = windowSeconds; }
+        public int getMaxKeys() { return maxKeys; }
+        public void setMaxKeys(int maxKeys) { this.maxKeys = maxKeys; }
+        public int getTrustedProxyHops() { return trustedProxyHops; }
+        public void setTrustedProxyHops(int trustedProxyHops) { this.trustedProxyHops = trustedProxyHops; }
+        public String getRedisUrl() { return redisUrl; }
+        public void setRedisUrl(String redisUrl) { this.redisUrl = redisUrl; }
+    }
+
     public boolean isRequireHardened() { return requireHardened; }
     public void setRequireHardened(boolean requireHardened) { this.requireHardened = requireHardened; }
     public boolean isDevMode() { return devMode; }
@@ -126,4 +152,6 @@ public class LukeAuthProperties {
     public void setGateway(Gateway gateway) { this.gateway = gateway; }
     public Session getSession() { return session; }
     public void setSession(Session session) { this.session = session; }
+    public Ratelimit getRatelimit() { return ratelimit; }
+    public void setRatelimit(Ratelimit ratelimit) { this.ratelimit = ratelimit; }
 }

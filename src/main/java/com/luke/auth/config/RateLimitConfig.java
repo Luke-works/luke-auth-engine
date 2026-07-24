@@ -9,7 +9,6 @@ import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.util.StringUtils;
@@ -35,14 +34,12 @@ public class RateLimitConfig {
             + "return c";
 
     @Bean
-    RateLimitStore rateLimitStore(
-            @Value("${luke.auth.ratelimit.max-requests:10}") int maxRequests,
-            @Value("${luke.auth.ratelimit.window-seconds:60}") long windowSeconds,
-            @Value("${luke.auth.ratelimit.max-keys:50000}") int maxKeys,
-            @Value("${luke.auth.ratelimit.redis-url:}") String redisUrl) {
-
-        long windowMillis = windowSeconds * 1000;
-        RateLimiter inMemory = new RateLimiter(maxRequests, windowMillis, maxKeys);
+    RateLimitStore rateLimitStore(LukeAuthProperties props) {
+        LukeAuthProperties.Ratelimit rl = props.getRatelimit();
+        int maxRequests = rl.getMaxRequests();
+        long windowMillis = rl.getWindowSeconds() * 1000;
+        String redisUrl = rl.getRedisUrl();
+        RateLimiter inMemory = new RateLimiter(maxRequests, windowMillis, rl.getMaxKeys());
 
         if (!StringUtils.hasText(redisUrl)) {
             log.info("Rate limiter: in-memory (per-instance). Set REDIS_URL for a global "

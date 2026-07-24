@@ -12,14 +12,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.net.URI;
-import java.net.URLDecoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayDeque;
-import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -414,28 +410,10 @@ public class EngineProxyController {
      * traversal ({@code ..}) segment — including encoded forms like {@code %2e%2e}
      * — so the caller can reject it before the public/protected decision.
      */
-    // Package-private (not private) so it can be unit-tested directly.
+    // Package-private (not private) so it can be unit-tested directly. Delegates to the shared
+    // canonicalizer the SecurityFilterChain allowlist also uses, so the two can never drift (#29).
     static String canonicalPath(String rawUri) {
-        if (rawUri == null) {
-            return null;
-        }
-        String decoded;
-        try {
-            decoded = URLDecoder.decode(rawUri, StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
-        Deque<String> segments = new ArrayDeque<>();
-        for (String segment : decoded.split("/", -1)) {
-            if (segment.isEmpty() || segment.equals(".")) {
-                continue; // collapse empty ("//") and current-dir segments
-            }
-            if (segment.equals("..")) {
-                return null; // refuse traversal outright
-            }
-            segments.addLast(segment);
-        }
-        return "/" + String.join("/", segments);
+        return RequestPaths.canonicalPath(rawUri);
     }
 
     private static String stripTrailingSlash(String url) {

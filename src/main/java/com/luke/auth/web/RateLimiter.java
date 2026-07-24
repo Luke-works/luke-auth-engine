@@ -6,11 +6,11 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * A small fixed-window rate limiter (#25). Per-key: at most {@code maxRequests}
  * hits per {@code windowMillis}; further hits report a Retry-After. In-memory and
- * therefore per-instance — adequate for throttling credential abuse on a single
- * gateway; a shared store (Redis) would be needed for strict cross-instance limits.
+ * therefore per-instance — the default, and the fallback for {@link RedisRateLimitStore}
+ * when a shared cross-instance limit ({@code REDIS_URL}) isn't configured or Redis is down (#56).
  * The key space is bounded ({@code maxKeys}) with lazy eviction of expired windows.
  */
-public class RateLimiter {
+public class RateLimiter implements RateLimitStore {
 
     private final int maxRequests;
     private final long windowMillis;
@@ -28,6 +28,7 @@ public class RateLimiter {
      * Record a hit for {@code key} at {@code nowMillis}.
      * @return {@code -1} if allowed; otherwise the Retry-After in seconds (&ge; 1).
      */
+    @Override
     public long retryAfterSeconds(String key, long nowMillis) {
         long[] out = {-1};
         windows.compute(key, (k, w) -> {

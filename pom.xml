@@ -50,6 +50,22 @@
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
+        <!-- Lettuce (Redis client) for the shared, cross-instance rate limiter (#56). Used only
+             when REDIS_URL is set; the limiter falls back to in-memory otherwise. Version managed
+             by the Spring Boot BOM. -->
+        <dependency>
+            <groupId>io.lettuce</groupId>
+            <artifactId>lettuce-core</artifactId>
+        </dependency>
+
+        <!-- Embedded Redis for the shared-limiter integration test (no Docker needed). -->
+        <dependency>
+            <groupId>com.github.codemonstur</groupId>
+            <artifactId>embedded-redis</artifactId>
+            <version>1.4.3</version>
+            <scope>test</scope>
+        </dependency>
+
         <!-- Nimbus JOSE + JWT: verify WorkOS access tokens (NimbusJwtDecoder) and
              mint/sign our internal act-as-user tokens. Pulled via Spring
              Security's oauth2-jose module to stay version-aligned with Boot. -->

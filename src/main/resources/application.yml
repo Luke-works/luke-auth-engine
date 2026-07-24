@@ -41,6 +41,10 @@ luke:
       max-requests: ${AUTH_RATELIMIT_MAX:10}
       window-seconds: ${AUTH_RATELIMIT_WINDOW_SECONDS:60}
       max-keys: ${AUTH_RATELIMIT_MAX_KEYS:50000}
+      # Shared cross-instance limiter (#56). Set REDIS_URL (e.g. redis://host:6379) to enforce the
+      # limit GLOBALLY across replicas; blank ⇒ in-memory per-instance (dev/qa default). If set but
+      # Redis is unreachable at boot, the app still starts on the in-memory limiter.
+      redis-url: ${REDIS_URL:}
 
     # ── /session translator ─────────────────────────────────────────────────
     # dev-mode allows an X-Dev-User header / /dev/token to stand in for a verified

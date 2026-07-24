@@ -30,7 +30,8 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
     private static final Set<String> LIMITED_PATHS = Set.of(
             "/auth/login", "/auth/register", "/auth/password", "/service/token");
 
-    private final RateLimiter limiter;
+    /** In-memory (per-instance) or Redis-backed (global) depending on REDIS_URL — see RateLimitConfig (#56). */
+    private final RateLimitStore limiter;
     /** Number of TRUSTED reverse proxies in front of this service (Render LB, Cloudflare…).
      *  The leftmost X-Forwarded-For hop is client-authored and spoofable, so with N trusted
      *  proxies the real client is the Nth entry counted from the right. Default 0 keeps the
@@ -39,11 +40,9 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
     private final int trustedProxyHops;
 
     public AuthRateLimitFilter(
-            @Value("${luke.auth.ratelimit.max-requests:10}") int maxRequests,
-            @Value("${luke.auth.ratelimit.window-seconds:60}") long windowSeconds,
-            @Value("${luke.auth.ratelimit.max-keys:50000}") int maxKeys,
+            RateLimitStore limiter,
             @Value("${luke.auth.ratelimit.trusted-proxy-hops:0}") int trustedProxyHops) {
-        this.limiter = new RateLimiter(maxRequests, windowSeconds * 1000, maxKeys);
+        this.limiter = limiter;
         this.trustedProxyHops = Math.max(0, trustedProxyHops);
     }
 

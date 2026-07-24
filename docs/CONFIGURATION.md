@@ -50,7 +50,12 @@ Defined in `application.yml` with env-var overrides. Grouped by area:
 - **`luke.auth.gateway.*`** — `private-key`, `require-stable-key`, `previous-public-key`
   (rotation, see `docs/key-rotation.md`), `issuer`, `audience`, `ttl-seconds`.
 - **`luke.auth.session.*`** — `cache-ttl-seconds`, `cache-max-entries`.
-- **`luke.auth.ratelimit.*`** — `max-requests`, `window-seconds`, `max-keys`, `trusted-proxy-hops`.
+- **`luke.auth.ratelimit.*`** — `max-requests`, `window-seconds`, `max-keys`, `trusted-proxy-hops`,
+  and **`redis-url`** (`REDIS_URL`). Blank ⇒ the limiter is in-memory and **per-instance** (limits
+  reset on restart and don't hold across replicas). Set `REDIS_URL` (e.g. `redis://host:6379`) to
+  enforce the credential-endpoint limit **globally** across all gateway replicas (#56). It fails
+  safe: if `REDIS_URL` is set but Redis is unreachable — at boot or at request time — the limiter
+  degrades to in-memory rather than failing the request or the boot.
 - **`luke.auth.service.*`** — `keys`, `operator-token` (service accounts; see `application.yml`).
 - **`luke.auth.onboarding.*`** — optional self-service provisioning into core-engine.
 - **`luke.auth.upstream.*`** — `max-attempts`, `retry-backoff-ms` (resilience, #23).

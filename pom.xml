@@ -58,6 +58,13 @@
             <artifactId>spring-security-oauth2-jose</artifactId>
         </dependency>
 
+        <!-- A central SecurityFilterChain for consistent security response headers and
+             a stateless/CSRF-off posture (#29). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

@@ -58,8 +58,11 @@ public class EngineProxyController {
     /** Hop-by-hop / managed request headers we must not copy verbatim between hops.
      *  accept-encoding is dropped so the engine never gzips (no encoding edge cases). */
     private static final Set<String> SKIP_REQUEST_HEADERS = Set.of(
+            // Hop-by-hop / restricted headers (RFC 7230). `upgrade`, `connection`, `content-length`,
+            // `expect`, `host` are also rejected by the JDK HttpClient — forwarding one 500s the
+            // request (a client that sends `Upgrade` would otherwise break every proxied call).
             "host", "authorization", "content-length", "connection", "transfer-encoding",
-            "expect", "accept-encoding",
+            "expect", "accept-encoding", "upgrade",
             // Identity / trust headers the downstream engines honor. The gateway is the
             // SOLE asserter of identity (via the minted act-as token), so a client must
             // never be able to inject these to impersonate a user or a trusted service.

@@ -60,8 +60,13 @@ jobs:
           path: sbom.cyclonedx.json
 
       - name: Scan image for fixable HIGH/CRITICAL CVEs
+        # Mount the workspace so trivy reads .trivyignore (justified, unremediable
+        # base-image CVEs only — app-dep CVEs must be fixed, not ignored).
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/scan" \
             aquasec/trivy:latest image \
             --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --ignorefile /scan/.trivyignore \
             --exit-code 1 --format table "$IMAGE"

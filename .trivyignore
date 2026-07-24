@@ -1,0 +1,20 @@
+# Trivy ignore list — supply-chain gate (#41).
+#
+# ONLY for CVEs we cannot remediate and that are not reachable in this runtime.
+# Everything else must be FIXED (bump the dep / base), never added here. App-dependency
+# CVEs are NOT eligible — those get a version bump (see the Spring Boot 3.5.16 bump that
+# cleared the jackson/tomcat/spring-boot findings).
+#
+# Review each entry when Dependabot bumps the eclipse-temurin base: if a newer base digest
+# drops the CVE, delete the line so the gate re-covers it.
+#
+# ── Go binary embedded in the eclipse-temurin:21-jre base image ──────────────────────────
+# These live in a Go-built helper inside the base OS layer, not in app.jar (which scans
+# clean). This is a Java service — the Go net/html parser, Go HTTP/2 server and Go os.Root
+# code paths are never invoked in our runtime. No eclipse-temurin:21-jre digest fixes them
+# yet; the pinned base is already the latest. Re-check on each base bump.  Reviewed 2026-07-24.
+CVE-2026-25681   # golang.org/x/net/html — arbitrary code execution (parser not invoked)
+CVE-2026-27136   # golang.org/x/net/html — DoS (parser not invoked)
+CVE-2026-33814   # golang.org/x/net http2 server — DoS (no Go HTTP server in this image's runtime path)
+CVE-2026-39821   # golang.org/x/net/idna / net/http — (not invoked)
+CVE-2026-39822   # Go stdlib os.Root symlink following — (not invoked)

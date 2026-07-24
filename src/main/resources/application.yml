@@ -97,6 +97,10 @@ luke:
       # use SameSite=None (+ Secure) only if the UI is on a cross-site domain.
       cookie-secure: ${WORKOS_COOKIE_SECURE:true}
       cookie-same-site: ${WORKOS_COOKIE_SAMESITE:Lax}
+      # Signing secret for inbound WorkOS webhooks (Directory Sync / user lifecycle, #38).
+      # From the WorkOS dashboard → Webhooks. BLANK (dev/qa default) disables the
+      # /webhooks/workos endpoint (returns 404) — set it to accept directory-sync events.
+      webhook-secret: ${WORKOS_WEBHOOK_SECRET:}
       # Create users already email-verified, bypassing email-ownership proof. This is
       # a DEV-ONLY shortcut (so headless local sign-up isn't blocked by WorkOS's
       # verified-email requirement). It defaults to false and the app REFUSES TO BOOT

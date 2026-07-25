@@ -63,24 +63,28 @@ public class OnboardingClient {
     }
 
     /**
-     * Provision {@code engineUserId} into the default tenant/role. No-op (with a
-     * debug log) when {@link #enabled()} is false. Throws on a non-2xx so the
-     * caller can decide whether a failed provision should fail registration.
+     * Provision {@code engineUserId} into the default tenant with the configured default role.
+     * Equivalent to {@link #provision(String, String, String, String, String)} with no role.
      */
     public void provision(String engineUserId, String firstName, String lastName, String email) {
+        provision(engineUserId, firstName, lastName, email, null);
+    }
+
+    /**
+     * Provision {@code engineUserId} into the default tenant, assigning {@code role} when supplied
+     * or the configured {@code default-role} otherwise (#61). The role is a WorkOS role slug: an
+     * IdP-assigned role forwards straight through, and core-engine's onboarding endpoint maps it to
+     * the canonical engine role (WorkOS's built-in {@code member}/{@code admin} → {@code tenant-user}/
+     * {@code tenant-admin}; an unknown slug is rejected). No-op (with a debug log) when {@link #enabled()}
+     * is false. Throws on a non-2xx so the caller can decide whether a failed provision fails registration.
+     */
+    public void provision(String engineUserId, String firstName, String lastName, String email, String role) {
         if (!enabled()) {
             log.debug("Onboarding skipped (no operator/default-tenant configured) for {}", engineUserId);
             return;
         }
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("id", engineUserId);
-        body.put("firstName", firstName == null ? "" : firstName);
-        body.put("lastName", lastName == null ? "" : lastName);
-        body.put("email", email);
-        body.put("password", randomUnusablePassword()); // FluxNova needs a value; WorkOS owns auth
-        body.put("tenantId", defaultTenant);
-        body.put("role", defaultRole);
-        body.put("accessLevel", defaultAccessLevel);
+        Map<String, Object> body = buildOnboardBody(engineUserId, firstName, lastName, email, role);
+        String resolvedRole = String.valueOf(body.get("role"));
 
         try {
             byte[] json = MAPPER.writeValueAsBytes(body);
@@ -98,7 +102,7 @@ public class OnboardingClient {
                 log.error("Onboarding failed for {} — core-engine returned {} {}", engineUserId, res.statusCode(), msg);
                 throw new OnboardingException("Onboarding failed (" + res.statusCode() + ")");
             }
-            log.info("Provisioned engine user {} into tenant {} as {}", engineUserId, defaultTenant, defaultRole);
+            log.info("Provisioned engine user {} into tenant {} as {}", engineUserId, defaultTenant, resolvedRole);
         } catch (OnboardingException e) {
             throw e;
         } catch (Exception e) {
@@ -107,6 +111,25 @@ public class OnboardingClient {
             log.error("Onboarding call failed for {}", engineUserId, e);
             throw new OnboardingException("Onboarding call failed");
         }
+    }
+
+    /**
+     * Build the {@code /api/admin/onboard-user} request body, resolving the role to the supplied
+     * WorkOS slug when present or the configured {@code default-role} otherwise (#61). Package-private
+     * so the role-resolution contract is unit-testable without an HTTP round-trip.
+     */
+    Map<String, Object> buildOnboardBody(String engineUserId, String firstName, String lastName,
+                                         String email, String role) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", engineUserId);
+        body.put("firstName", firstName == null ? "" : firstName);
+        body.put("lastName", lastName == null ? "" : lastName);
+        body.put("email", email);
+        body.put("password", randomUnusablePassword()); // FluxNova needs a value; WorkOS owns auth
+        body.put("tenantId", defaultTenant);
+        body.put("role", StringUtils.hasText(role) ? role : defaultRole);
+        body.put("accessLevel", defaultAccessLevel);
+        return body;
     }
 
     /** True when an operator credential is configured — enough to deprovision (no default tenant needed). */

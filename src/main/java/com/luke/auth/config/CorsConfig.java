@@ -33,6 +33,11 @@ public class CorsConfig {
         // headers like X-User-Id are intentionally NOT allowed — the gateway asserts
         // identity via the act-as token, and the proxy strips them anyway.)
         config.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept", "X-Tenant-Id"));
+        // Response headers the browser JS is allowed to READ cross-origin. Without this, fetch()
+        // can't see the correlation id (undercutting the #20/#37 traceability story) nor a download's
+        // Content-Disposition filename / byte-range headers the proxy relays for DOCUMENTS + email assets.
+        config.setExposedHeaders(List.of(
+                "X-Correlation-Id", "Content-Disposition", "Retry-After", "Content-Range", "Accept-Ranges"));
         config.setAllowCredentials(true);
         config.setMaxAge(3600L);
 
@@ -48,6 +53,10 @@ public class CorsConfig {
         publicConfig.setAllowedOriginPatterns(List.of("*"));
         publicConfig.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
         publicConfig.setAllowedHeaders(List.of("Content-Type", "Accept", "X-Tenant-Id"));
+        // Same read-access for the public embed/asset surface (e.g. a recipient's mail client reading
+        // Content-Disposition / byte-range headers on a served email image).
+        publicConfig.setExposedHeaders(List.of(
+                "X-Correlation-Id", "Content-Disposition", "Retry-After", "Content-Range", "Accept-Ranges"));
         publicConfig.setAllowCredentials(false);
         publicConfig.setMaxAge(3600L);
 

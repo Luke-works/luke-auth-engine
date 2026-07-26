@@ -35,6 +35,19 @@ class CorsConfigTest {
     }
 
     @Test
+    void exposesTraceabilityAndDownloadHeadersToBrowserJs() {
+        // Both surfaces must let cross-origin fetch() READ these — else the UI can't surface the
+        // correlation id in an error report, nor read a download's filename / byte-range headers.
+        for (String route : new String[] {"/**", "/api/public/**"}) {
+            CorsConfiguration cfg = source().getCorsConfigurations().get(route);
+            assertNotNull(cfg);
+            assertNotNull(cfg.getExposedHeaders(), route + " must expose response headers");
+            assertTrue(cfg.getExposedHeaders().contains("X-Correlation-Id"), route + " must expose the correlation id");
+            assertTrue(cfg.getExposedHeaders().contains("Content-Disposition"), route + " must expose the filename");
+        }
+    }
+
+    @Test
     void publicSurfaceAllowsAnyOriginWithoutCredentials() {
         UrlBasedCorsConfigurationSource src = source();
         var patterns = src.getCorsConfigurations().keySet().stream().toList();

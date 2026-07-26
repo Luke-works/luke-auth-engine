@@ -1,11 +1,13 @@
 package com.luke.auth.web;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.luke.auth.config.CorrelationIdFilter;
 import com.luke.auth.config.GatewayKeys;
 import com.luke.auth.config.WorkosTokenVerifier;
 import com.luke.auth.identity.IdentityResolver;
 import com.luke.auth.session.PermissionsClient;
 import com.luke.auth.session.SessionService;
+import com.luke.auth.web.error.ApiError;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.FilterInputStream;
 import java.io.IOException;
@@ -15,6 +17,8 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +31,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtException;
@@ -98,27 +103,39 @@ public class EngineProxyController {
     /** Max bytes accepted for a forwarded request body; larger ones get 413. Default 100 MiB. */
     private final long maxRequestBytes;
 
+    /** Serializes the RFC 7807 error bodies (#37) the proxy returns — Jackson escapes any interpolated
+     *  client input, so a hostile header can never break the JSON. */
+    private final ObjectMapper objectMapper;
+
+    /** Per-request forward timeout; a breach surfaces as 504 (not 502). */
+    private final Duration requestTimeout;
+
     public EngineProxyController(WorkosTokenVerifier workosVerifier,
                                  IdentityResolver identityResolver,
                                  GatewayKeys gatewayKeys,
                                  SessionService sessionService,
+                                 ObjectMapper objectMapper,
                                  @Value("${luke.auth.core-engine.base-url}") String coreEngineBaseUrl,
                                  @Value("${luke.auth.file-proxy.base-url:}") String fileProxyBaseUrl,
                                  @Value("${luke.auth.dev-mode:false}") boolean devMode,
-                                 @Value("${luke.auth.proxy.max-request-bytes:104857600}") long maxRequestBytes) {
+                                 @Value("${luke.auth.proxy.max-request-bytes:104857600}") long maxRequestBytes,
+                                 @Value("${luke.auth.proxy.connect-timeout-seconds:10}") long connectTimeoutSeconds,
+                                 @Value("${luke.auth.proxy.request-timeout-seconds:60}") long requestTimeoutSeconds) {
         this.workosVerifier = workosVerifier;
         this.identityResolver = identityResolver;
         this.gatewayKeys = gatewayKeys;
         this.sessionService = sessionService;
+        this.objectMapper = objectMapper;
         this.devMode = devMode;
         this.maxRequestBytes = maxRequestBytes;
+        this.requestTimeout = Duration.ofSeconds(requestTimeoutSeconds);
         this.coreEngineBaseUrl = stripTrailingSlash(coreEngineBaseUrl);
         // The DOCUMENTS byte tier (luke-file-proxy). When unset, /api/documents/** falls through to core
         // unchanged (no behavior change) — set it to send byte traffic to the proxy instead.
         this.fileProxyBaseUrl = fileProxyBaseUrl == null || fileProxyBaseUrl.isBlank()
                 ? null : stripTrailingSlash(fileProxyBaseUrl);
         this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
+                .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .build();
     }
@@ -210,9 +227,7 @@ public class EngineProxyController {
                 } catch (PermissionsClient.UpstreamException e) {
                     log.warn("Tenant membership check failed (upstream) for {} / {}: {}",
                             engineUserId, requestedTenant, e.getMessage());
-                    return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body("{\"error\":\"Bad Gateway\",\"message\":\"Could not verify tenant access\"}".getBytes());
+                    return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", "Could not verify tenant access");
                 }
             }
 
@@ -229,7 +244,7 @@ public class EngineProxyController {
         HttpRequest.BodyPublisher bodyPublisher = bodyPublisherFor(request);
 
         HttpRequest.Builder forward = HttpRequest.newBuilder(target)
-                .timeout(Duration.ofSeconds(60))
+                .timeout(requestTimeout)
                 .method(request.getMethod(), bodyPublisher);
 
         copyRequestHeaders(request, forward);
@@ -246,15 +261,18 @@ public class EngineProxyController {
         HttpResponse<byte[]> upstream;
         try {
             upstream = httpClient.send(forward.build(), HttpResponse.BodyHandlers.ofByteArray());
+        } catch (HttpTimeoutException e) {
+            // A slow-but-reachable engine (brownout) is a gateway TIMEOUT, not "unreachable" — 504, not 502.
+            log.warn("Upstream engine timed out after {}s for {} {}", requestTimeout.toSeconds(),
+                    request.getMethod(), target);
+            return error(HttpStatus.GATEWAY_TIMEOUT, "Gateway Timeout", "The engine did not respond in time.");
         } catch (Exception e) {
             if (isPayloadTooLarge(e)) {
                 log.debug("Rejected oversized streamed request body for {} {}", request.getMethod(), target);
                 return payloadTooLarge();
             }
             log.error("Upstream engine call failed for {} {}", request.getMethod(), target, e);
-            return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body("{\"error\":\"Bad Gateway\",\"message\":\"Engine unreachable\"}".getBytes());
+            return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", "Engine unreachable");
         }
 
         // ── 5. Relay the engine's response back to the consumer ───────────────
@@ -317,11 +335,8 @@ public class EngineProxyController {
     }
 
     private ResponseEntity<byte[]> payloadTooLarge() {
-        String json = "{\"error\":\"Payload Too Large\",\"message\":\"Request body exceeds the "
-                + maxRequestBytes + "-byte limit\"}";
-        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(json.getBytes());
+        return error(HttpStatus.PAYLOAD_TOO_LARGE, "Payload Too Large",
+                "Request body exceeds the " + maxRequestBytes + "-byte limit");
     }
 
     /** True if the throwable (or any cause) is our body-size limit breach. */
@@ -387,24 +402,35 @@ public class EngineProxyController {
     }
 
     private ResponseEntity<byte[]> unauthorized(String message) {
-        String json = "{\"error\":\"Unauthorized\",\"message\":\"" + message + "\"}";
-        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(json.getBytes());
+        return error(HttpStatus.UNAUTHORIZED, "Unauthorized", message);
     }
 
     private ResponseEntity<byte[]> forbidden(String message) {
-        String json = "{\"error\":\"Forbidden\",\"message\":\"" + message + "\"}";
-        return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(json.getBytes());
+        return error(HttpStatus.FORBIDDEN, "Forbidden", message);
     }
 
     private ResponseEntity<byte[]> badRequest(String message) {
-        String json = "{\"error\":\"Bad Request\",\"message\":\"" + message + "\"}";
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(json.getBytes());
+        return error(HttpStatus.BAD_REQUEST, "Bad Request", message);
+    }
+
+    /**
+     * The single RFC 7807 error body the proxy returns (#37) — same {@code application/problem+json}
+     * shape as {@link ApiError} (type/title/status/detail + legacy error/message + correlationId).
+     * Serialized via the shared {@link ObjectMapper}, so any client-controlled value spliced into
+     * {@code detail} (e.g. an {@code X-Tenant-Id} header) is JSON-escaped and can never break the body.
+     */
+    private ResponseEntity<byte[]> error(HttpStatus status, String title, String detail) {
+        ProblemDetail pd = ApiError.problem(status, title, detail);
+        byte[] body;
+        try {
+            body = objectMapper.writeValueAsBytes(pd);
+        } catch (Exception e) {
+            // Error rendering must never itself throw; fall back to a minimal safe body.
+            body = ("{\"error\":\"" + status.getReasonPhrase() + "\"}").getBytes(StandardCharsets.UTF_8);
+        }
+        return ResponseEntity.status(status)
+                .contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .body(body);
     }
 
     /**

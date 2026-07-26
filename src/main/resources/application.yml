@@ -41,6 +41,12 @@ luke:
       max-requests: ${AUTH_RATELIMIT_MAX:10}
       window-seconds: ${AUTH_RATELIMIT_WINDOW_SECONDS:60}
       max-keys: ${AUTH_RATELIMIT_MAX_KEYS:50000}
+      # Reverse-proxy hops in front of the gateway, for spoof-resistant client-IP resolution
+      # (the rate-limit key + the audit source IP). Default 2 = Cloudflare + Render (verified
+      # topology — the real client is the 2nd X-Forwarded-For entry from the RIGHT). Without this a
+      # caller could rotate a fake leftmost X-Forwarded-For to dodge the login/register limiter.
+      # 0 = legacy leftmost (single-hop / local dev). Override per env via AUTH_TRUSTED_PROXY_HOPS.
+      trusted-proxy-hops: ${AUTH_TRUSTED_PROXY_HOPS:2}
       # Shared cross-instance limiter (#56). Set REDIS_URL (e.g. redis://host:6379) to enforce the
       # limit GLOBALLY across replicas; blank ⇒ in-memory per-instance (dev/qa default). If set but
       # Redis is unreachable at boot, the app still starts on the in-memory limiter.

@@ -78,6 +78,7 @@ class ProxyBodyForwardingTest {
         // A malicious client tries to inject identity/trust headers to impersonate a user/service.
         h.set("X-User-Id", "victim");
         h.set("X-Internal-Key", "guessed-secret");
+        h.set("X-Gateway-Auth", "guessed-vouch");
         h.set("X-Correlation-Id", "trace-xyz");
 
         ResponseEntity<String> r = rest.postForEntity("/api/echo", new HttpEntity<>("{}", h), String.class);
@@ -86,6 +87,8 @@ class ProxyBodyForwardingTest {
         // The gateway is the SOLE identity asserter — spoofed identity/trust headers never reach upstream.
         assertNull(RECEIVED_HEADERS.get().getFirst("X-User-Id"), "spoofed X-User-Id must be stripped");
         assertNull(RECEIVED_HEADERS.get().getFirst("X-Internal-Key"), "spoofed X-Internal-Key must be stripped");
+        // A forged gateway-vouch is stripped (and not re-stamped here, since no secret is configured).
+        assertNull(RECEIVED_HEADERS.get().getFirst("X-Gateway-Auth"), "spoofed X-Gateway-Auth must be stripped");
         // The correlation id IS forwarded so one trace spans the gateway → engine hop.
         assertEquals("trace-xyz", RECEIVED_HEADERS.get().getFirst("X-Correlation-Id"));
         // Upstream infra headers must not be relayed back to the browser.

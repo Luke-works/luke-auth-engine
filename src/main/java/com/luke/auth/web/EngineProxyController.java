@@ -73,7 +73,9 @@ public class EngineProxyController {
             // never be able to inject these to impersonate a user or a trusted service.
             // x-real-client-ip is the gateway-vouched client IP for core's public rate limiters —
             // stripped here so a client can't forge it, then re-asserted below from the real IP.
-            "x-user-id", "x-dev-user", "x-internal-key", "x-real-client-ip",
+            // x-gateway-auth is the proof-of-origin secret core uses to lock its public surface to the
+            // gateway — stripped so a client can't present it, then re-asserted below when configured.
+            "x-user-id", "x-dev-user", "x-internal-key", "x-real-client-ip", "x-gateway-auth",
             // Correlation id is re-asserted from the (sanitized) MDC value below, so the
             // raw client header is not copied verbatim.
             "x-correlation-id");
@@ -118,6 +120,12 @@ public class EngineProxyController {
      *  gateway's own rate limiter uses; 0 = legacy left-most. */
     private final int trustedProxyHops;
 
+    /** Shared secret the gateway stamps as X-Real-Client-IP's proof-of-origin (X-Gateway-Auth) on every
+     *  forward to core, so core can lock its PUBLIC surface to gateway-only (core's PublicGatewayAuthFilter
+     *  requires it). Blank ⇒ not stamped (feature off; core stays open). Set the SAME value here and in
+     *  core to arm the lock. Never logged. */
+    private final String gatewayVouchSecret;
+
     public EngineProxyController(WorkosTokenVerifier workosVerifier,
                                  IdentityResolver identityResolver,
                                  GatewayKeys gatewayKeys,
@@ -129,7 +137,8 @@ public class EngineProxyController {
                                  @Value("${luke.auth.proxy.max-request-bytes:104857600}") long maxRequestBytes,
                                  @Value("${luke.auth.proxy.connect-timeout-seconds:10}") long connectTimeoutSeconds,
                                  @Value("${luke.auth.proxy.request-timeout-seconds:60}") long requestTimeoutSeconds,
-                                 @Value("${luke.auth.ratelimit.trusted-proxy-hops:0}") int trustedProxyHops) {
+                                 @Value("${luke.auth.ratelimit.trusted-proxy-hops:0}") int trustedProxyHops,
+                                 @Value("${GATEWAY_VOUCH_SECRET:}") String gatewayVouchSecret) {
         this.workosVerifier = workosVerifier;
         this.identityResolver = identityResolver;
         this.gatewayKeys = gatewayKeys;
@@ -139,6 +148,7 @@ public class EngineProxyController {
         this.maxRequestBytes = maxRequestBytes;
         this.requestTimeout = Duration.ofSeconds(requestTimeoutSeconds);
         this.trustedProxyHops = Math.max(0, trustedProxyHops);
+        this.gatewayVouchSecret = gatewayVouchSecret == null ? "" : gatewayVouchSecret.trim();
         this.coreEngineBaseUrl = stripTrailingSlash(coreEngineBaseUrl);
         // The DOCUMENTS byte tier (luke-file-proxy). When unset, /api/documents/** falls through to core
         // unchanged (no behavior change) — set it to send byte traffic to the proxy instead.
@@ -273,6 +283,10 @@ public class EngineProxyController {
         // gateway-vouched value. Trustworthy end-to-end once core's public surface is reachable only
         // through the gateway (edge lock-down); before that it is no more forgeable than XFF already is.
         forward.header("X-Real-Client-IP", ClientIp.resolve(request, trustedProxyHops));
+        // Proof-of-origin: when configured, vouch that this request came from the gateway so core can
+        // reject direct-to-core hits on its public surface (incl. the raw *.onrender.com URL a CDN edge
+        // rule can't cover). A client-supplied X-Gateway-Auth was stripped above, so this is never forgeable.
+        if (!gatewayVouchSecret.isBlank()) forward.header("X-Gateway-Auth", gatewayVouchSecret);
 
         HttpResponse<byte[]> upstream;
         try {

@@ -51,6 +51,13 @@
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
+        <!-- OBS-4: backend error tracking. DSN-gated — inert until SENTRY_DSN is set (Spring relaxed
+             binding maps the env var to sentry.dsn), so dev/qa run with no config and no calls out. -->
+        <dependency>
+            <groupId>io.sentry</groupId>
+            <artifactId>sentry-spring-boot-starter-jakarta</artifactId>
+            <version>8.50.1</version>
+        </dependency>
 
         <!-- Bean Validation: backs @Validated on LukeAuthProperties so a malformed
              config is caught at bind time rather than at first request (#35). -->

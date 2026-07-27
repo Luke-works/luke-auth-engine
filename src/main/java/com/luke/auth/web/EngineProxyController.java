@@ -126,6 +126,10 @@ public class EngineProxyController {
      *  core to arm the lock. Never logged. */
     private final String gatewayVouchSecret;
 
+    /** Per-upstream circuit breaker: after repeated core/file-proxy failures, fail fast with 503 for a
+     *  cooldown instead of piling every caller up behind the full timeout on a service that is down. */
+    private final UpstreamCircuitBreaker circuitBreaker;
+
     public EngineProxyController(WorkosTokenVerifier workosVerifier,
                                  IdentityResolver identityResolver,
                                  GatewayKeys gatewayKeys,
@@ -138,7 +142,8 @@ public class EngineProxyController {
                                  @Value("${luke.auth.proxy.connect-timeout-seconds:10}") long connectTimeoutSeconds,
                                  @Value("${luke.auth.proxy.request-timeout-seconds:60}") long requestTimeoutSeconds,
                                  @Value("${luke.auth.ratelimit.trusted-proxy-hops:0}") int trustedProxyHops,
-                                 @Value("${GATEWAY_VOUCH_SECRET:}") String gatewayVouchSecret) {
+                                 @Value("${GATEWAY_VOUCH_SECRET:}") String gatewayVouchSecret,
+                                 UpstreamCircuitBreaker circuitBreaker) {
         this.workosVerifier = workosVerifier;
         this.identityResolver = identityResolver;
         this.gatewayKeys = gatewayKeys;
@@ -149,6 +154,7 @@ public class EngineProxyController {
         this.requestTimeout = Duration.ofSeconds(requestTimeoutSeconds);
         this.trustedProxyHops = Math.max(0, trustedProxyHops);
         this.gatewayVouchSecret = gatewayVouchSecret == null ? "" : gatewayVouchSecret.trim();
+        this.circuitBreaker = circuitBreaker;
         this.coreEngineBaseUrl = stripTrailingSlash(coreEngineBaseUrl);
         // The DOCUMENTS byte tier (luke-file-proxy). When unset, /api/documents/** falls through to core
         // unchanged (no behavior change) — set it to send byte traffic to the proxy instead.
@@ -288,21 +294,42 @@ public class EngineProxyController {
         // rule can't cover). A client-supplied X-Gateway-Auth was stripped above, so this is never forgeable.
         if (!gatewayVouchSecret.isBlank()) forward.header("X-Gateway-Auth", gatewayVouchSecret);
 
+        // Circuit breaker (D1): if this upstream is currently OPEN (repeatedly failing), fail fast with
+        // 503 + Retry-After instead of making the caller wait out the full timeout on a service that is
+        // plainly down — which is how a downstream outage snowballs into a gateway pile-up.
+        if (!circuitBreaker.allowRequest(baseUrl)) {
+            long retryAfter = Math.max(1, circuitBreaker.retryAfterSeconds(baseUrl));
+            log.warn("Circuit open for upstream {} — failing fast (503) for {} {}",
+                    baseUrl, request.getMethod(), target);
+            return error(HttpStatus.SERVICE_UNAVAILABLE, "Service Unavailable",
+                    "The engine is temporarily unavailable; please retry shortly.", retryAfter);
+        }
+
         HttpResponse<byte[]> upstream;
         try {
             upstream = httpClient.send(forward.build(), HttpResponse.BodyHandlers.ofByteArray());
         } catch (HttpTimeoutException e) {
             // A slow-but-reachable engine (brownout) is a gateway TIMEOUT, not "unreachable" — 504, not 502.
+            circuitBreaker.recordFailure(baseUrl);
             log.warn("Upstream engine timed out after {}s for {} {}", requestTimeout.toSeconds(),
                     request.getMethod(), target);
             return error(HttpStatus.GATEWAY_TIMEOUT, "Gateway Timeout", "The engine did not respond in time.");
         } catch (Exception e) {
             if (isPayloadTooLarge(e)) {
+                // A client-side oversized body is NOT an upstream failure — don't trip the breaker.
                 log.debug("Rejected oversized streamed request body for {} {}", request.getMethod(), target);
                 return payloadTooLarge();
             }
+            circuitBreaker.recordFailure(baseUrl);
             log.error("Upstream engine call failed for {} {}", request.getMethod(), target, e);
             return error(HttpStatus.BAD_GATEWAY, "Bad Gateway", "Engine unreachable");
+        }
+        // An upstream 5xx counts as a failure toward the breaker; any other status (2xx/3xx/4xx) proves
+        // the upstream is alive and resets the consecutive-failure count.
+        if (upstream.statusCode() >= 500) {
+            circuitBreaker.recordFailure(baseUrl);
+        } else {
+            circuitBreaker.recordSuccess(baseUrl);
         }
 
         // ── 5. Relay the engine's response back to the consumer ───────────────
@@ -450,6 +477,12 @@ public class EngineProxyController {
      * {@code detail} (e.g. an {@code X-Tenant-Id} header) is JSON-escaped and can never break the body.
      */
     private ResponseEntity<byte[]> error(HttpStatus status, String title, String detail) {
+        return error(status, title, detail, 0);
+    }
+
+    /** As {@link #error(HttpStatus, String, String)} but adds a {@code Retry-After} header when
+     *  {@code retryAfterSeconds > 0} (used by the circuit-breaker 503 so clients back off sensibly). */
+    private ResponseEntity<byte[]> error(HttpStatus status, String title, String detail, long retryAfterSeconds) {
         ProblemDetail pd = ApiError.problem(status, title, detail);
         byte[] body;
         try {
@@ -458,9 +491,12 @@ public class EngineProxyController {
             // Error rendering must never itself throw; fall back to a minimal safe body.
             body = ("{\"error\":\"" + status.getReasonPhrase() + "\"}").getBytes(StandardCharsets.UTF_8);
         }
-        return ResponseEntity.status(status)
-                .contentType(MediaType.APPLICATION_PROBLEM_JSON)
-                .body(body);
+        ResponseEntity.BodyBuilder builder = ResponseEntity.status(status)
+                .contentType(MediaType.APPLICATION_PROBLEM_JSON);
+        if (retryAfterSeconds > 0) {
+            builder.header(HttpHeaders.RETRY_AFTER, Long.toString(retryAfterSeconds));
+        }
+        return builder.body(body);
     }
 
     /**

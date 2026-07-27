@@ -41,7 +41,8 @@ class EngineProxyTenantTest {
 
         EngineProxyController proxy = new EngineProxyController(
                 verifier, idr, keys, sessions, new ObjectMapper(),
-                "http://core", null, false, 104857600L, 10L, 60L, 2, "");
+                "http://core", null, false, 104857600L, 10L, 60L, 2, "",
+                new UpstreamCircuitBreaker(false, 5, 15, System::currentTimeMillis));
 
         HttpServletRequest req = mock(HttpServletRequest.class);
         when(req.getMethod()).thenReturn("GET");
@@ -80,7 +81,8 @@ class EngineProxyTenantTest {
         ObjectMapper mapper = new ObjectMapper();
         EngineProxyController proxy = new EngineProxyController(
                 verifier, idr, keys, sessions, mapper,
-                "http://core", null, false, 104857600L, 10L, 60L, 2, "");
+                "http://core", null, false, 104857600L, 10L, 60L, 2, "",
+                new UpstreamCircuitBreaker(false, 5, 15, System::currentTimeMillis));
 
         HttpServletRequest req = mock(HttpServletRequest.class);
         when(req.getMethod()).thenReturn("GET");

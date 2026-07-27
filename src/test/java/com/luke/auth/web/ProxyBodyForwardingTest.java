@@ -2,6 +2,8 @@ package com.luke.auth.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -89,6 +91,25 @@ class ProxyBodyForwardingTest {
         // Upstream infra headers must not be relayed back to the browser.
         assertFalse(r.getHeaders().containsKey("cf-ray"), "cf-ray must not be relayed");
         assertFalse(r.getHeaders().containsKey("Set-Cookie"), "Set-Cookie must not be relayed");
+    }
+
+    @Test
+    void stampsGatewayVouchedClientIpAndStripsAForgedOne() {
+        HttpHeaders h = new HttpHeaders();
+        h.setContentType(MediaType.APPLICATION_JSON);
+        h.set("X-Dev-User", "dev-user-1");
+        // A client tries to forge the vouched-IP header AND spoof a left-most X-Forwarded-For hop.
+        h.set("X-Real-Client-IP", "6.6.6.6");            // forgery — must be stripped, never forwarded
+        h.set("X-Forwarded-For", "1.2.3.4, 10.0.0.1");   // the gateway resolves the real client from this
+
+        ResponseEntity<String> r = rest.postForEntity("/api/echo", new HttpEntity<>("{}", h), String.class);
+
+        assertEquals(200, r.getStatusCode().value());
+        String vouched = RECEIVED_HEADERS.get().getFirst("X-Real-Client-IP");
+        // The gateway is the SOLE asserter of the client IP: it re-stamps X-Real-Client-IP from the real
+        // request, so core's public limiters get a gateway-vouched value and never the client's forgery.
+        assertNotNull(vouched, "gateway must stamp a vouched X-Real-Client-IP for core's public limiters");
+        assertNotEquals("6.6.6.6", vouched, "the client-forged X-Real-Client-IP must be stripped, not forwarded");
     }
 
     private static HttpServer startUpstream() {

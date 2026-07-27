@@ -71,7 +71,9 @@ public class EngineProxyController {
             // Identity / trust headers the downstream engines honor. The gateway is the
             // SOLE asserter of identity (via the minted act-as token), so a client must
             // never be able to inject these to impersonate a user or a trusted service.
-            "x-user-id", "x-dev-user", "x-internal-key",
+            // x-real-client-ip is the gateway-vouched client IP for core's public rate limiters —
+            // stripped here so a client can't forge it, then re-asserted below from the real IP.
+            "x-user-id", "x-dev-user", "x-internal-key", "x-real-client-ip",
             // Correlation id is re-asserted from the (sanitized) MDC value below, so the
             // raw client header is not copied verbatim.
             "x-correlation-id");
@@ -110,6 +112,12 @@ public class EngineProxyController {
     /** Per-request forward timeout; a breach surfaces as 504 (not 502). */
     private final Duration requestTimeout;
 
+    /** Trusted reverse-proxy hops in front of the gateway, so the true client IP is resolved from the
+     *  right of X-Forwarded-For (Cloudflare + Render = 2) rather than a spoofable left-most entry. The
+     *  gateway stamps that resolved IP as X-Real-Client-IP for core's public rate limiters. Same key the
+     *  gateway's own rate limiter uses; 0 = legacy left-most. */
+    private final int trustedProxyHops;
+
     public EngineProxyController(WorkosTokenVerifier workosVerifier,
                                  IdentityResolver identityResolver,
                                  GatewayKeys gatewayKeys,
@@ -120,7 +128,8 @@ public class EngineProxyController {
                                  @Value("${luke.auth.dev-mode:false}") boolean devMode,
                                  @Value("${luke.auth.proxy.max-request-bytes:104857600}") long maxRequestBytes,
                                  @Value("${luke.auth.proxy.connect-timeout-seconds:10}") long connectTimeoutSeconds,
-                                 @Value("${luke.auth.proxy.request-timeout-seconds:60}") long requestTimeoutSeconds) {
+                                 @Value("${luke.auth.proxy.request-timeout-seconds:60}") long requestTimeoutSeconds,
+                                 @Value("${luke.auth.ratelimit.trusted-proxy-hops:0}") int trustedProxyHops) {
         this.workosVerifier = workosVerifier;
         this.identityResolver = identityResolver;
         this.gatewayKeys = gatewayKeys;
@@ -129,6 +138,7 @@ public class EngineProxyController {
         this.devMode = devMode;
         this.maxRequestBytes = maxRequestBytes;
         this.requestTimeout = Duration.ofSeconds(requestTimeoutSeconds);
+        this.trustedProxyHops = Math.max(0, trustedProxyHops);
         this.coreEngineBaseUrl = stripTrailingSlash(coreEngineBaseUrl);
         // The DOCUMENTS byte tier (luke-file-proxy). When unset, /api/documents/** falls through to core
         // unchanged (no behavior change) — set it to send byte traffic to the proxy instead.
@@ -257,6 +267,12 @@ public class EngineProxyController {
         // gateway → engine hop (CorrelationIdFilter set it on the MDC for this thread).
         String correlationId = MDC.get(CorrelationIdFilter.MDC_KEY);
         if (correlationId != null) forward.header(CorrelationIdFilter.HEADER, correlationId);
+        // Vouch the true client IP for core's PUBLIC rate limiters (embed/minion). Resolved
+        // spoof-resistantly from the right of X-Forwarded-For (trustedProxyHops); the raw client
+        // X-Real-Client-IP was stripped on the way in (SKIP_REQUEST_HEADERS), so this is always the
+        // gateway-vouched value. Trustworthy end-to-end once core's public surface is reachable only
+        // through the gateway (edge lock-down); before that it is no more forgeable than XFF already is.
+        forward.header("X-Real-Client-IP", ClientIp.resolve(request, trustedProxyHops));
 
         HttpResponse<byte[]> upstream;
         try {

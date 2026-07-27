@@ -45,6 +45,12 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!-- OBS-2: Prometheus metrics registry → /actuator/prometheus for the Grafana Alloy
+             collector (gateway 5xx-rate, p95 latency, JVM). Version managed by the Spring Boot BOM. -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
 
         <!-- Bean Validation: backs @Validated on LukeAuthProperties so a malformed
              config is caught at bind time rather than at first request (#35). -->

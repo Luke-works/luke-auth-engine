@@ -8,8 +8,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
+
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
  * Functional test of the gateway proxy (real HTTP; no DB). Proves a protected path
@@ -50,6 +53,42 @@ class ProxyAuthFunctionalTest {
         ResponseEntity<String> r = rest.exchange(
                 "/api/me/permissions", HttpMethod.OPTIONS, HttpEntity.EMPTY, String.class);
         assertEquals(200, r.getStatusCode().value());
+    }
+
+    @Test
+    void corsPreflight_forAMutation_carriesTheAllowHeaders() {
+        // A real preflight: Origin + Access-Control-Request-Method (what a browser sends before a
+        // PATCH). Must come back with Allow-Origin/Allow-Methods or the browser blocks the PATCH.
+        HttpHeaders h = new HttpHeaders();
+        h.set(HttpHeaders.ORIGIN, "http://localhost:5173");
+        h.set(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, "PATCH");
+        h.set(HttpHeaders.ACCESS_CONTROL_REQUEST_HEADERS, "authorization,content-type,x-tenant-id");
+        ResponseEntity<String> r = rest.exchange(
+                "/api/form-definitions/abc", HttpMethod.OPTIONS, new HttpEntity<>(h), String.class);
+        assertEquals("http://localhost:5173",
+                r.getHeaders().getFirst(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN),
+                "preflight must be answered with the caller's origin");
+        assertNotNull(r.getHeaders().getFirst(HttpHeaders.ACCESS_CONTROL_ALLOW_METHODS));
+        // Explicitly ordering the filter must not ALSO leave it auto-registered: a duplicated
+        // Allow-Origin header is itself a CORS failure in the browser.
+        assertEquals(1, r.getHeaders().get(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN).size(),
+                "exactly one Allow-Origin header — the filter must be registered once");
+    }
+
+    @Test
+    void unauthorized_stillCarriesCorsHeaders() {
+        // An expired/invalid access token gets a 401 — the UI's refresh-on-401 retry depends on
+        // READING that 401. Without CORS headers the browser blocks the response entirely, the
+        // fetch rejects as a network/CORS error, and the retry never runs.
+        HttpHeaders h = new HttpHeaders();
+        h.set(HttpHeaders.ORIGIN, "http://localhost:5173");
+        h.setBearerAuth("expired.jwt.value");
+        ResponseEntity<String> r = rest.exchange(
+                "/api/form-definitions", HttpMethod.GET, new HttpEntity<>(h), String.class);
+        assertEquals(401, r.getStatusCode().value());
+        assertEquals("http://localhost:5173",
+                r.getHeaders().getFirst(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN),
+                "a 401 must still be CORS-readable by the browser");
     }
 
     @Test

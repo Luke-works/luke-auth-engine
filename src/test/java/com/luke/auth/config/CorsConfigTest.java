@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.security.SecurityProperties;
+import org.springframework.core.Ordered;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -61,5 +63,22 @@ class CorsConfigTest {
             assertTrue(patterns.indexOf(route) < patterns.indexOf("/**"),
                     route + " must be registered before the catch-all");
         }
+    }
+
+    @Test
+    void corsFilterRunsBeforeTheSecurityChainAndTheRateLimiter() {
+        // A plain Filter bean is ordered LOWEST_PRECEDENCE — i.e. after the security chain — so
+        // its 401 would leave without CORS headers and the browser would report a CORS error
+        // instead of a readable 401. Keep it ahead of every layer that can reject a request.
+        LukeCorsProperties props = new LukeCorsProperties();
+        CorsConfig config = new CorsConfig(props);
+        int order = config.corsFilterRegistration(config.corsFilter()).getOrder();
+
+        assertTrue(order < SecurityProperties.DEFAULT_FILTER_ORDER,
+                "CORS must run before springSecurityFilterChain (" + SecurityProperties.DEFAULT_FILTER_ORDER + ")");
+        assertTrue(order < Ordered.HIGHEST_PRECEDENCE + 20,
+                "CORS must run before AuthRateLimitFilter so its 429 is CORS-readable");
+        assertTrue(order > Ordered.HIGHEST_PRECEDENCE,
+                "CORS must run after CorrelationIdFilter so rejections keep a correlation id");
     }
 }

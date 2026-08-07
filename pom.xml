@@ -80,7 +80,7 @@
         <dependency>
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-api</artifactId>
-            <version>2.8.9</version>
+            <version>3.1.0</version>
         </dependency>
 
         <!-- Embedded Redis for the shared-limiter integration test (no Docker needed). -->

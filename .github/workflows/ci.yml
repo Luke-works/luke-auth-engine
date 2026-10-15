@@ -54,7 +54,7 @@ jobs:
           echo "SBOM components: $(python3 -c 'import json,sys;print(len(json.load(open("sbom.cyclonedx.json")).get("components",[])))')"
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-auth-engine.cyclonedx.json
           path: sbom.cyclonedx.json
